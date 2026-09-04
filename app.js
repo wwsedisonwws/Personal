@@ -334,14 +334,17 @@ function roomStatus(room) {
 
 // 本月收租进度（不含自住房，不含合约未开始的房间）
 function monthProgress(ym = thisYM()) {
-  let due = 0, got = 0, rooms = 0, done = 0, overdue = 0, overdueAmt = 0;
+  let due = 0, got = 0, rooms = 0, done = 0;
+  let overdue = 0, overdueAmt = 0, waiting = 0, waitingAmt = 0;
   for (const t of DB.tenancies) {
     if (!LIVE(t) || !isDue(t, ym)) continue;
     rooms++; due += rentFor(t, ym);
     if (paymentOf(t.id, ym)) { done++; got += paidAmount(t, ym); }
     else if (isPastDue(t, ym)) { overdue++; overdueAmt += rentFor(t, ym); }
+    else { waiting++; waitingAmt += rentFor(t, ym); }   // 还没到收租日，不算欠
   }
-  return { due, got, rooms, done, overdue, overdueAmt, outstanding: due - got };
+  return { due, got, rooms, done, overdue, overdueAmt, waiting, waitingAmt,
+           outstanding: due - got };
 }
 
 const stayNights = s => Math.max(0, daysBetween(s.check_in, s.check_out));
@@ -607,8 +610,11 @@ function viewDashboard() {
     <div class="hero-figure">${rm(mp.got)} <span class="muted" style="font-size:20px">/ ${rm(mp.due)}</span></div>
     <div class="bar"><i style="width:${pct}%"></i></div>
     <div class="hero-sub">${mp.done} / ${mp.rooms} 间已收${
-      mp.overdue > 0 ? ` · <b style="color:var(--bad)">${mp.overdue} 间逾期，${rm(mp.overdueAmt)}</b>`
-      : (mp.outstanding > 0 ? ` · 还差 <b>${rm(mp.outstanding)}</b>，都还没到收租日` : ' · 本月已收齐 🎉')}</div>
+      mp.overdue > 0 ? ` · <b style="color:var(--bad)">${mp.overdue} 间逾期 ${rm(mp.overdueAmt)}</b>` : ''}${
+      mp.waiting > 0 ? ` · ${mp.waiting} 间还没到收租日 ${rm(mp.waitingAmt)}` : ''}${
+      mp.outstanding === 0 ? ' · 本月已收齐 🎉' : ''}
+      ${mp.outstanding > 0 ? '<button class="linkish" data-tab="collect" style="margin-left:6px">看是哪几间</button>' : ''}
+    </div>
   </div>
 
   ${briefingHTML()}
@@ -833,9 +839,10 @@ function viewCollect() {
     <div class="hero-figure">${rm(mp.got)} <span class="muted" style="font-size:20px">/ ${rm(mp.due)}</span></div>
     <div class="bar"><i style="width:${mp.due ? Math.round(mp.got / mp.due * 100) : 0}%"></i></div>
     <div class="hero-sub">
-      ${mp.done} / ${mp.rooms} 间已收${mp.overdue > 0
-        ? ` · <b style="color:var(--bad)">${mp.overdue} 间逾期，${rm(mp.overdueAmt)}</b>`
-        : (mp.done < mp.rooms ? ' · 其余还没到收租日' : ' · 收齐了 🎉')}
+      ${mp.done} / ${mp.rooms} 间已收${
+        mp.overdue > 0 ? ` · <b style="color:var(--bad)">${mp.overdue} 间逾期 ${rm(mp.overdueAmt)}</b>` : ''}${
+        mp.waiting > 0 ? ` · ${mp.waiting} 间还没到收租日 ${rm(mp.waitingAmt)}` : ''}${
+        mp.outstanding === 0 ? ' · 收齐了 🎉' : ''}
     </div>
   </div>
   ${rentGroups || '<div class="card"><div class="empty">本月没有需要收租的房间。</div></div>'}
