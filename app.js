@@ -213,21 +213,41 @@ function airconStats(ym = thisYM()) {
 
 const daysInMonth = ym => { const [y, m] = ym.split('-').map(Number); return new Date(y, m, 0).getDate(); };
 
-// 这间房这个月空几天。合约中途起讫时算部分空置 ——
+// 这间房这个月哪几天空着。合约中途起讫时算部分空置 ——
 // WeiQing 11/19 到期，十一月是空 11 天而不是整月，两者差很多钱。
+//
+// 逐日标记而不是把各租约天数相加：两份租约重叠时（zhengyu 和 Hansen 十月就重叠）
+// 相加会重复计数，把月内别处真实的空档抵消掉。顺便也才能得出具体是哪几天。
 function vacancyOf(room, ym) {
   if (room.self_occupied) return null;
   const total = daysInMonth(ym);
   const mStart = `${ym}-01`, mEnd = `${ym}-${pad2(total)}`;
-  let covered = 0;
+  const busy = new Array(total + 2).fill(false);
   for (const t of DB.tenancies) {
     if (t.room_id !== room.id || !LIVE(t)) continue;
     const a = t.contract_start > mStart ? t.contract_start : mStart;
     const b = t.contract_end   < mEnd   ? t.contract_end   : mEnd;
-    if (a <= b) covered += daysBetween(a, b) + 1;
+    if (a > b) continue;
+    for (let d = Number(a.slice(8)); d <= Number(b.slice(8)); d++) busy[d] = true;
   }
-  const vacant = Math.max(0, total - covered);
-  return vacant > 0 ? { vacant, total } : null;
+  // 合并成连续区间，一个月里可能空好几段
+  const gaps = [];
+  let from = null;
+  for (let d = 1; d <= total + 1; d++) {
+    if (d <= total && !busy[d]) { if (from === null) from = d; }
+    else if (from !== null) { gaps.push({ from, to: d - 1 }); from = null; }
+  }
+  const vacant = gaps.reduce((s, g) => s + (g.to - g.from + 1), 0);
+  return vacant > 0 ? { vacant, total, gaps } : null;
+}
+
+// 「整月」或「10/26–10/31」。月内多段就用顿号连起来。
+function vacancySpan(ym, v) {
+  if (!v.gaps || v.vacant === v.total) return '整月';
+  const m = Number(ym.slice(5));
+  return v.gaps.map(g => g.from === g.to
+    ? `${m}/${g.from}`
+    : `${m}/${g.from}–${m}/${g.to}`).join('、');
 }
 
 // 这间房该按多少钱估算损失：在住 → 已预订 → 最近一位住过的 → 参考租金
@@ -259,7 +279,7 @@ function monthBreakdown(ym) {
         let_.push({
           where, room, occupants,
           rent: occupants.reduce((s, t) => s + rentFor(t, ym), 0),
-          partial: v ? v.vacant : 0,
+          partial: v,   // 当月有人住但没住满，带上是哪几天空的
         });
       }
       if (v && !occupants.length) {
@@ -515,7 +535,7 @@ function viewDashboard() {
         </div>
         <div class="row-meta">
           <span>${esc(p?.name || '')}</span>
-          <span class="pill bad">空 ${g.vacant === g.total ? '整月' : g.vacant + ' 天'}</span>
+          <span class="pill bad">空 ${vacancySpan(g.ym, g)}${g.vacant === g.total ? '' : `（${g.vacant} 天）`}</span>
           <span class="muted">${esc(g.next.tenant_name)} ${g.next.contract_start} 才来</span>
         </div>
       </button>`;
@@ -538,7 +558,7 @@ function viewDashboard() {
         </div>
         <div class="row-meta">
           <span>${esc(p?.name || '')}</span>
-          <span class="pill warn">空 ${g.vacant === g.total ? '整月' : g.vacant + ' 天'}</span>
+          <span class="pill warn">空 ${vacancySpan(g.ym, g)}${g.vacant === g.total ? '' : `（${g.vacant} 天）`}</span>
         </div>
       </button>`;
     }).join('')}
@@ -1290,12 +1310,13 @@ function monthDetailHTML(ym) {
     <h4>出租中 · ${let_.length} 间 · ${rm(income)}</h4>
     ${let_.length ? `<ul>${let_.map(x => `<li>
       <span>${esc(x.where)} <span class="muted">${x.occupants.map(t => esc(t.tenant_name)).join('、')}</span>${
-        x.partial ? ` <span class="tag">当月空 ${x.partial} 天</span>` : ''}</span>
+        x.partial ? ` <span class="tag">当月空 ${vacancySpan(ym, x.partial)}（${x.partial.vacant} 天）</span>` : ''}</span>
       <b>${rm(x.rent)}</b></li>`).join('')}</ul>` : '<div class="empty">无</div>'}
 
     ${vacant.length ? `<h4 style="color:var(--bad)">空置 · ${vacant.length} 间 · 少收约 ${rm(lost)}</h4>
     <ul>${vacant.map(x => `<li>
-      <span>${esc(x.where)} <span class="muted">空 ${x.vacant === x.total ? '整月' : x.vacant + ' 天'}</span><br>${
+      <span>${esc(x.where)} <span class="muted">空 ${vacancySpan(ym, x)}${
+        x.vacant === x.total ? '' : `（${x.vacant} 天）`}</span><br>${
         x.next
           ? `<span class="pill warn">${x.next.contract_start} ${esc(x.next.tenant_name)} 已定 · 只能短租</span>`
           : '<span class="tag">可长租</span>'}</span>
