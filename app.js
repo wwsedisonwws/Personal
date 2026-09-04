@@ -48,7 +48,7 @@ let session = null;
 
 const DB = {
   properties: [], rooms: [], tenancies: [], payments: [],
-  accounts: [], stays: [], settings: null,
+  accounts: [], stays: [], aircon: [], settings: null,
 };
 
 const UI = { tab: 'dash', roomId: null, year: thisYear() };
@@ -65,19 +65,21 @@ function toast(msg, kind = '') {
 /* ================================================================ 数据读写 */
 
 async function loadAll() {
-  const tables = ['properties', 'rooms', 'tenancies', 'payments', 'accounts', 'short_stays', 'app_settings'];
+  const tables = ['properties', 'rooms', 'tenancies', 'payments', 'accounts',
+                  'short_stays', 'aircon_charges', 'app_settings'];
   const results = await Promise.all(tables.map(t => sb.from(t).select('*')));
 
   const failed = results.find(r => r.error);
   if (failed) throw failed.error;
 
-  const [props, rooms, ten, pay, acc, stays, settings] = results.map(r => r.data || []);
+  const [props, rooms, ten, pay, acc, stays, aircon, settings] = results.map(r => r.data || []);
   DB.properties = props.sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
   DB.rooms = rooms.sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
   DB.tenancies = ten;
   DB.payments = pay;
   DB.accounts = acc.sort((a, b) => a.sort_order - b.sort_order);
   DB.stays = stays.sort((a, b) => b.check_in.localeCompare(a.check_in));
+  DB.aircon = aircon;
   DB.settings = settings[0] || null;
 
   if (!DB.settings) {
@@ -134,9 +136,51 @@ const paidAmount = (t, ym) => {
   return p ? (p.amount == null ? num(t.monthly_rent) : num(p.amount)) : 0;
 };
 
+// 这份租约某个月的实际收租日。有人 1 号交，有人 19 号、25 号。
+const dueDay = t => Math.min(Math.max(num(t.rent_due_day) || 1, 1), 28);
+const dueDateOf = (t, ym) => `${ym}-${pad2(dueDay(t))}`;
+// 是否已经过了收租日。没到日子就不算欠 —— 25 号才交租的人，4 号催他是冤枉的。
+const isPastDue = (t, ym) => todayISO() >= dueDateOf(t, ym);
+
+// 某个月的收租状态
+function rentState(t, ym) {
+  if (paymentOf(t.id, ym)) return { key: 'paid', label: '✓ 已收', cls: 'on' };
+  if (!isPastDue(t, ym)) {
+    const d = daysUntil(dueDateOf(t, ym));
+    return { key: 'waiting', label: `${dueDay(t)} 号收`, cls: '', note: `还有 ${d} 天` };
+  }
+  const late = daysBetween(dueDateOf(t, ym), todayISO());
+  return {
+    key: late === 0 ? 'today' : 'late',
+    label: late === 0 ? '今天该收' : `逾期 ${late} 天`,
+    cls: 'off',
+  };
+}
+
 function arrearsOf(t) {
-  const unpaid = dueMonths(t).filter(ym => !paymentOf(t.id, ym));
+  // 只算已经过了收租日的月份
+  const unpaid = dueMonths(t).filter(ym => !paymentOf(t.id, ym) && isPastDue(t, ym));
   return { months: unpaid, amount: unpaid.length * num(t.monthly_rent) };
+}
+
+/* -------- 空调费：每月一行，金额随电单变动，跟租金分开打勾 -------- */
+const airconOf = (tenancyId, ym) => DB.aircon.find(a => a.tenancy_id === tenancyId && a.ym === ym);
+
+// 本月需要交空调费的租约（所有在住的租客都要交）
+const airconTenancies = (ym = thisYM()) =>
+  DB.tenancies.filter(t => t.status === 'active' && isDue(t, ym));
+
+function airconStats(ym = thisYM()) {
+  const list = airconTenancies(ym);
+  let recorded = 0, billed = 0, collected = 0, paidCount = 0;
+  for (const t of list) {
+    const a = airconOf(t.id, ym);
+    if (!a) continue;
+    recorded++; billed += num(a.amount);
+    if (a.paid) { paidCount++; collected += num(a.amount); }
+  }
+  return { total: list.length, recorded, billed, collected, paidCount,
+           missing: list.length - recorded, outstanding: billed - collected };
 }
 
 // 房间当下的真实状态。关键：合约还没开始 = 房子现在是空的，
@@ -157,13 +201,14 @@ function roomStatus(room) {
 
 // 本月收租进度（不含自住房，不含合约未开始的房间）
 function monthProgress(ym = thisYM()) {
-  let due = 0, got = 0, rooms = 0, done = 0;
+  let due = 0, got = 0, rooms = 0, done = 0, overdue = 0, overdueAmt = 0;
   for (const t of DB.tenancies) {
     if (t.status !== 'active' || !isDue(t, ym)) continue;
     rooms++; due += num(t.monthly_rent);
     if (paymentOf(t.id, ym)) { done++; got += paidAmount(t, ym); }
+    else if (isPastDue(t, ym)) { overdue++; overdueAmt += num(t.monthly_rent); }
   }
-  return { due, got, rooms, done, outstanding: due - got };
+  return { due, got, rooms, done, overdue, overdueAmt, outstanding: due - got };
 }
 
 const stayNights = s => Math.max(0, daysBetween(s.check_in, s.check_out));
@@ -252,6 +297,7 @@ function render() {
 
 function viewDashboard() {
   const mp = monthProgress();
+  const ac = airconStats();
   const pct = mp.due > 0 ? Math.round(mp.got / mp.due * 100) : 0;
 
   // 空房 / 待入住
@@ -282,8 +328,22 @@ function viewDashboard() {
     <div class="hero-label">${ymLabel(thisYM())} 收租</div>
     <div class="hero-figure">${rm(mp.got)} <span class="muted" style="font-size:20px">/ ${rm(mp.due)}</span></div>
     <div class="bar"><i style="width:${pct}%"></i></div>
-    <div class="hero-sub">${mp.done} / ${mp.rooms} 间已收${mp.outstanding > 0 ? ` · 还差 <b>${rm(mp.outstanding)}</b>` : ' · 本月已收齐 🎉'}</div>
+    <div class="hero-sub">${mp.done} / ${mp.rooms} 间已收${
+      mp.overdue > 0 ? ` · <b style="color:var(--bad)">${mp.overdue} 间逾期，${rm(mp.overdueAmt)}</b>`
+      : (mp.outstanding > 0 ? ` · 还差 <b>${rm(mp.outstanding)}</b>，都还没到收租日` : ' · 本月已收齐 🎉')}</div>
   </div>
+
+  ${ac.missing > 0 ? `<div class="card" style="border-color:var(--warn)">
+    <h2>⏰ 本月空调费还没记录 <span class="sub">每月 1 号</span></h2>
+    <p style="margin:0 0 12px;font-size:14px;color:var(--text-2)">
+      还有 <b>${ac.missing}</b> 个租客没填金额。看完电单去「收租」页逐个填，再打勾收款。
+    </p>
+    <button class="primary" data-tab="collect">去填空调费</button>
+  </div>` : (ac.outstanding > 0 ? `<div class="card">
+    <h2>空调费 <span class="sub">${ac.paidCount} / ${ac.total} 已收</span></h2>
+    <div class="hero-sub">本月合计 ${rm(ac.billed)}，已收 ${rm(ac.collected)}，
+      还差 <b style="color:var(--bad)">${rm(ac.outstanding)}</b>。</div>
+  </div>` : '')}
 
   <div class="card">
     <h2>关键数字</h2>
@@ -293,7 +353,7 @@ function viewDashboard() {
       <div class="stat"><div class="k">押金在手</div><div class="v">${rm(totalDeposits())}</div>
         <div class="n">要能随时退</div></div>
       <div class="stat"><div class="k">累计欠收</div><div class="v" style="color:${arrearsTotal > 0 ? 'var(--bad)' : 'inherit'}">${rm(arrearsTotal)}</div>
-        <div class="n">${arrears.length} 间有欠款</div></div>
+        <div class="n">${arrears.length} 间有欠款（已过收租日）</div></div>
       <div class="stat"><div class="k">空置 / 待入住</div><div class="v">${vacant.length}</div>
         <div class="n">共 ${DB.rooms.length} 间房</div></div>
     </div>
@@ -368,36 +428,85 @@ function viewDashboard() {
 function viewCollect() {
   const ym = thisYM();
   const mp = monthProgress(ym);
+  const ac = airconStats(ym);
 
-  const groups = DB.properties.map(p => {
+  const rentGroups = DB.properties.map(p => {
     const rows = roomsOf(p.id).map(room => {
       const t = activeTenancy(room.id);
       if (!t || !isDue(t, ym)) return '';
+      const rs = rentState(t, ym);
       const pay = paymentOf(t.id, ym);
-      const on = !!pay;
       const extra = pay && num(pay.cny_amount) > 0 ? ` · 支付宝 ${cny(pay.cny_amount)}` : '';
+      const sub = rs.key === 'waiting'
+        ? `${rm(t.monthly_rent)} · <span class="muted">${dueDay(t)} 号收，${rs.note}</span>`
+        : rs.key === 'late'
+          ? `${rm(t.monthly_rent)} · <span style="color:var(--bad)">${rs.label}</span>`
+          : `${rm(t.monthly_rent)}${extra}`;
       return `<div class="collect-row">
         <div class="left">
           <div class="who">${esc(room.name)} · ${esc(t.tenant_name)}</div>
-          <div class="sub">${rm(t.monthly_rent)}${extra}</div>
+          <div class="sub">${sub}</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex:0 0 auto">
-          ${on ? `<button class="linkish" data-editpay="${t.id}">改</button>` : ''}
-          <button class="tick ${on ? 'on' : 'off'}" data-tick="${t.id}">${on ? '✓ 已收' : '✕ 未收'}</button>
+          ${pay ? `<button class="linkish" data-editpay="${t.id}">改</button>` : ''}
+          <button class="tick ${rs.cls}" data-tick="${t.id}">${rs.key === 'paid' ? '✓ 已收' : '✕ 未收'}</button>
         </div>
       </div>`;
     }).filter(Boolean).join('');
     return rows ? `<div class="card"><h2>${esc(p.name)}</h2>${rows}</div>` : '';
   }).join('');
 
+  // 空调费：每月 1 号看完电单逐个填金额，再各自打勾
+  const prevYM = addMonthsYM(ym, -1);
+  const airRows = DB.properties.map(p => {
+    const rows = roomsOf(p.id).map(room => {
+      const t = activeTenancy(room.id);
+      if (!t || !isDue(t, ym)) return '';
+      const a = airconOf(t.id, ym);
+      const prev = airconOf(t.id, prevYM);
+      const hint = prev ? `上月 ${rm(prev.amount)}` : '<span class="muted">上月无记录</span>';
+      return `<form class="collect-row aircon-row" data-tenancy="${t.id}">
+        <div class="left">
+          <div class="who">${esc(room.name)} · ${esc(t.tenant_name)}</div>
+          <div class="sub">${hint}</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex:0 0 auto">
+          <input type="number" step="1" min="0" value="${a ? num(a.amount) : ''}" placeholder="RM"
+            style="width:76px;font-size:16px;padding:7px 8px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text)">
+          <button type="submit" class="ghost">存</button>
+          <button type="button" class="tick ${a ? (a.paid ? 'on' : 'off') : ''}"
+            data-airtick="${t.id}" ${a ? '' : 'disabled'}>${a && a.paid ? '✓' : '✕'}</button>
+        </div>
+      </form>`;
+    }).filter(Boolean).join('');
+    return rows ? `<div style="margin-top:6px"><div class="hero-label" style="margin:10px 0 2px">${esc(p.name)}</div>${rows}</div>` : '';
+  }).join('');
+
   return `
   <div class="card">
-    <div class="hero-label">${ymLabel(ym)}</div>
+    <div class="hero-label">${ymLabel(ym)} 租金</div>
     <div class="hero-figure">${rm(mp.got)} <span class="muted" style="font-size:20px">/ ${rm(mp.due)}</span></div>
     <div class="bar"><i style="width:${mp.due ? Math.round(mp.got / mp.due * 100) : 0}%"></i></div>
-    <div class="hero-sub">点右边的按钮直接打勾。收人民币的按「改」补填金额。</div>
+    <div class="hero-sub">
+      ${mp.done} / ${mp.rooms} 间已收${mp.overdue > 0
+        ? ` · <b style="color:var(--bad)">${mp.overdue} 间逾期，${rm(mp.overdueAmt)}</b>`
+        : (mp.done < mp.rooms ? ' · 其余还没到收租日' : ' · 收齐了 🎉')}
+    </div>
   </div>
-  ${groups || '<div class="card"><div class="empty">本月没有需要收租的房间。</div></div>'}
+  ${rentGroups || '<div class="card"><div class="empty">本月没有需要收租的房间。</div></div>'}
+
+  <div class="card">
+    <h2>${ymLabel(ym)} 空调费 <span class="sub">${ac.paidCount} / ${ac.total} 已收</span></h2>
+    ${ac.missing > 0
+      ? `<div class="banner warn" style="margin:0 0 12px">还有 <b>${ac.missing}</b> 个租客的空调费没填金额。看完电单逐个填，再打勾收款。</div>`
+      : `<div class="banner warn" style="margin:0 0 12px;background:var(--good-soft);color:var(--good)">
+           本月电费已全部录入，合计 <b>${rm(ac.billed)}</b>，已收 <b>${rm(ac.collected)}</b>${
+             ac.outstanding > 0 ? `，还差 <b>${rm(ac.outstanding)}</b>` : ''}。</div>`}
+    ${airRows || '<div class="empty">本月没有在住租客。</div>'}
+    <div class="hint muted" style="margin-top:12px;font-size:12px">
+      金额每月按实际电费填，跟租金分开打勾 —— 可以出现「租金收了、空调费还欠着」。
+    </div>
+  </div>
   `;
 }
 
@@ -544,6 +653,9 @@ function tenancyFormHTML(t, room) {
       <div class="field"><label for="t-dep">押金 (RM)</label><input type="number" id="t-dep" step="50" value="${num(t.deposit)}"></div>
       <div class="field"><label for="t-start">合约开始</label><input type="date" id="t-start" value="${t.contract_start}" required></div>
       <div class="field"><label for="t-end">合约结束</label><input type="date" id="t-end" value="${t.contract_end}" required></div>
+      <div class="field"><label for="t-due">每月几号收租</label>
+        <input type="number" id="t-due" min="1" max="28" value="${dueDay(t)}">
+        <div class="hint">默认 1 号。上限 28，因为 2 月没有 29 号之后</div></div>
       <div class="field wide"><label for="t-notes">备注</label><textarea id="t-notes">${esc(t.notes)}</textarea></div>
       <div class="actions wide"><button type="submit" class="primary">保存</button></div>
     </form>
@@ -561,6 +673,8 @@ function newTenantFormHTML(room) {
       <div class="field"><label for="t-dep">押金 (RM)</label><input type="number" id="t-dep" step="50"></div>
       <div class="field"><label for="t-start">合约开始</label><input type="date" id="t-start" value="${todayISO()}" required></div>
       <div class="field"><label for="t-end">合约结束</label><input type="date" id="t-end" required></div>
+      <div class="field"><label for="t-due">每月几号收租</label>
+        <input type="number" id="t-due" min="1" max="28" value="1"></div>
       <div class="actions wide"><button type="submit" class="primary">登记</button></div>
     </form>
   </div>`;
@@ -811,7 +925,7 @@ function armDanger(btn, onConfirm) {
 }
 
 document.addEventListener('click', async ev => {
-  const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay]');
+  const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay],[data-airtick]');
   if (!el) return;
   const d = el.dataset;
 
@@ -886,6 +1000,14 @@ document.addEventListener('click', async ev => {
     return;
   }
 
+  if (d.airtick) {
+    const a = airconOf(d.airtick, thisYM());
+    if (!a) { toast('先填金额再打勾'); return; }
+    await write(() => sb.from('aircon_charges')
+      .update({ paid: !a.paid, paid_on: a.paid ? null : todayISO() }).eq('id', a.id));
+    return;
+  }
+
   if (d.staypaid) {
     const s = DB.stays.find(x => x.id === d.staypaid);
     await write(() => sb.from('short_stays').update({ paid: !s.paid }).eq('id', s.id));
@@ -923,6 +1045,7 @@ document.addEventListener('submit', async ev => {
       deposit: Number($('#t-dep').value) || 0,
       contract_start: $('#t-start').value,
       contract_end: $('#t-end').value,
+      rent_due_day: Math.min(Math.max(Number($('#t-due').value) || 1, 1), 28),
       notes: $('#t-notes').value.trim(),
     }).eq('id', f.dataset.id), '已保存');
     return;
@@ -937,6 +1060,7 @@ document.addEventListener('submit', async ev => {
       deposit: Number($('#t-dep').value) || 0,
       contract_start: $('#t-start').value,
       contract_end: $('#t-end').value,
+      rent_due_day: Math.min(Math.max(Number($('#t-due').value) || 1, 1), 28),
     }), '已登记');
     return;
   }
@@ -990,6 +1114,20 @@ document.addEventListener('submit', async ev => {
       paid: $('#s-paid').value === '1',
       note: $('#s-note').value.trim(),
     }), '日租已新增');
+    return;
+  }
+
+  if (f.classList.contains('aircon-row')) {
+    const raw = $('input', f).value.trim();
+    const tid = f.dataset.tenancy;
+    const existing = airconOf(tid, thisYM());
+    if (raw === '') {
+      if (existing) await write(() => sb.from('aircon_charges').delete().eq('id', existing.id), '已清除');
+      return;
+    }
+    await write(() => sb.from('aircon_charges').upsert(
+      { tenancy_id: tid, ym: thisYM(), amount: Number(raw) || 0 },
+      { onConflict: 'tenancy_id,ym' }), '空调费已存');
     return;
   }
 

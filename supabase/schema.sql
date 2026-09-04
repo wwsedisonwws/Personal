@@ -44,10 +44,16 @@ create table if not exists public.tenancies (
   contract_end   date not null,
   status         text not null default 'active' check (status in ('active','ended')),
   move_out_date  date,
+  -- 每月几号交租。不是所有房客都 1 号交 —— 有人 19 号、有人 25 号。
+  -- 上限 28，避免 2 月没有 29/30/31 号。
+  rent_due_day   int  not null default 1 check (rent_due_day between 1 and 28),
   notes          text not null default '',
   created_at     timestamptz not null default now(),
   constraint tenancy_dates_ordered check (contract_end >= contract_start)
 );
+
+-- 给已经建过表的库补上这一列（重复跑 schema.sql 时用）
+alter table public.tenancies add column if not exists rent_due_day int not null default 1;
 
 -- 同一间房只允许一份生效中的租约（防止误建两份导致重复计租）
 create unique index if not exists tenancies_one_active_per_room
@@ -98,6 +104,25 @@ create table if not exists public.payments (
   unique (tenancy_id, ym)
 );
 
+-- ---------------------------------------------------------------- 空调费
+-- 每月 1 号看完电单，逐个租客填金额，再各自打勾收款。
+-- 金额每月不同（按实际电费），所以不能存在租约上，必须一个月一行。
+-- 跟租金分开记：可以出现「租金收了，空调费还欠着」。
+create table if not exists public.aircon_charges (
+  id          uuid primary key default gen_random_uuid(),
+  owner_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  tenancy_id  uuid not null references public.tenancies(id) on delete cascade,
+  ym          text not null check (ym ~ '^\d{4}-(0[1-9]|1[0-2])$'),
+  amount      numeric(10,2) not null default 0,   -- 马币
+  paid        boolean not null default false,
+  paid_on     date,
+  cny_amount  numeric(12,2),
+  account_id  uuid references public.accounts(id) on delete set null,
+  note        text not null default '',
+  created_at  timestamptz not null default now(),
+  unique (tenancy_id, ym)
+);
+
 -- ---------------------------------------------------------------- 日租
 -- 「哪间空就用哪间」，所以带 room_id，应用层会检查是否跟月租合约撞期。
 create table if not exists public.short_stays (
@@ -124,6 +149,8 @@ create index if not exists rooms_property_idx      on public.rooms(property_id);
 create index if not exists tenancies_room_idx      on public.tenancies(room_id);
 create index if not exists payments_tenancy_idx    on public.payments(tenancy_id);
 create index if not exists payments_ym_idx         on public.payments(ym);
+create index if not exists aircon_tenancy_idx      on public.aircon_charges(tenancy_id);
+create index if not exists aircon_ym_idx            on public.aircon_charges(ym);
 create index if not exists short_stays_room_idx    on public.short_stays(room_id);
 create index if not exists short_stays_dates_idx   on public.short_stays(check_in, check_out);
 create index if not exists properties_owner_idx    on public.properties(owner_id);
@@ -136,6 +163,7 @@ alter table public.payments     enable row level security;
 alter table public.accounts     enable row level security;
 alter table public.app_settings enable row level security;
 alter table public.short_stays  enable row level security;
+alter table public.aircon_charges enable row level security;
 
 -- 所有表策略相同：只能碰自己的行。
 -- using 管读取/更新前的可见性，with check 管写入后的值 —— 两个都要，
@@ -144,7 +172,8 @@ do $$
 declare t text;
 begin
   foreach t in array array[
-    'properties','rooms','tenancies','payments','accounts','app_settings','short_stays'
+    'properties','rooms','tenancies','payments','accounts','app_settings',
+    'short_stays','aircon_charges'
   ] loop
     execute format('drop policy if exists own_rows_select on public.%I', t);
     execute format('drop policy if exists own_rows_insert on public.%I', t);
