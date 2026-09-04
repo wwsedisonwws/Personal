@@ -39,10 +39,14 @@ create table if not exists public.tenancies (
   tenant_name    text not null,
   phone          text not null default '',
   deposit        numeric(10,2) not null default 0,   -- 马币计价
+  -- 押金实收人民币。押金是马币负债、钱进的是人民币账户，
+  -- 不记下当初按什么汇率收的，就算不出这笔押金真实的汇兑盈亏。
+  deposit_cny    numeric(12,2),
   monthly_rent   numeric(10,2) not null,             -- 马币计价
   contract_start date not null,
   contract_end   date not null,
-  status         text not null default 'active' check (status in ('active','ended')),
+  -- active 在住 / booked 已预订（合约还没开始，房间可能还有人住）/ ended 已搬走
+  status         text not null default 'active' check (status in ('active','booked','ended')),
   move_out_date  date,
   -- 每月几号交租。不是所有房客都 1 号交 —— 有人 19 号、有人 25 号。
   -- 上限 28，避免 2 月没有 29/30/31 号。
@@ -58,10 +62,20 @@ create table if not exists public.tenancies (
 -- 给已经建过表的库补上这一列（重复跑 schema.sql 时用）
 alter table public.tenancies add column if not exists rent_due_day int not null default 1;
 alter table public.tenancies add column if not exists first_month_rent numeric(10,2);
+alter table public.tenancies add column if not exists deposit_cny numeric(12,2);
 
--- 同一间房只允许一份生效中的租约（防止误建两份导致重复计租）
+-- 已建库升级：放宽 status 允许 'booked'
+do $$ begin
+  alter table public.tenancies drop constraint if exists tenancies_status_check;
+  alter table public.tenancies add constraint tenancies_status_check
+    check (status in ('active','booked','ended'));
+end $$;
+
+-- 同一间房只允许一份在住租约、一份预订租约（防止误建两份导致重复计租）
 create unique index if not exists tenancies_one_active_per_room
   on public.tenancies (room_id) where status = 'active';
+create unique index if not exists tenancies_one_booked_per_room
+  on public.tenancies (room_id) where status = 'booked';
 
 -- ---------------------------------------------------------------- 收款账户
 -- 两个支付宝各一行。余额靠手动更新（支付宝没有开放接口可以自动拉）。

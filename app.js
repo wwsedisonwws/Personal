@@ -108,6 +108,11 @@ async function write(fn, okMsg) {
 
 const roomsOf = pid => DB.rooms.filter(r => r.property_id === pid);
 const activeTenancy = roomId => DB.tenancies.find(t => t.room_id === roomId && t.status === 'active');
+// 已预订：合约还没开始，房间可能还住着上一位。押金已经收在手上，未来收入也算数。
+const bookedTenancy = roomId => DB.tenancies.find(t => t.room_id === roomId && t.status === 'booked');
+// 「还没结束的租约」—— 在住 + 已预订。凡是算钱的地方都用它，
+// 具体哪个月算不算由 isDue 按合约日期决定。
+const LIVE = t => t.status === 'active' || t.status === 'booked';
 const propertyOf = roomId => {
   const room = DB.rooms.find(r => r.id === roomId);
   return room ? DB.properties.find(p => p.id === room.property_id) : null;
@@ -180,7 +185,7 @@ const airconOf = (tenancyId, ym) => DB.aircon.find(a => a.tenancy_id === tenancy
 
 // 本月需要交空调费的租约（所有在住的租客都要交）
 const airconTenancies = (ym = thisYM()) =>
-  DB.tenancies.filter(t => t.status === 'active' && isDue(t, ym));
+  DB.tenancies.filter(t => LIVE(t) && isDue(t, ym));
 
 function airconStats(ym = thisYM()) {
   const list = airconTenancies(ym);
@@ -215,7 +220,7 @@ function roomStatus(room) {
 function monthProgress(ym = thisYM()) {
   let due = 0, got = 0, rooms = 0, done = 0, overdue = 0, overdueAmt = 0;
   for (const t of DB.tenancies) {
-    if (t.status !== 'active' || !isDue(t, ym)) continue;
+    if (!LIVE(t) || !isDue(t, ym)) continue;
     rooms++; due += rentFor(t, ym);
     if (paymentOf(t.id, ym)) { done++; got += paidAmount(t, ym); }
     else if (isPastDue(t, ym)) { overdue++; overdueAmt += rentFor(t, ym); }
@@ -232,7 +237,7 @@ const stayIncomeOf = ym =>
           .reduce((sum, s) => sum + stayAmount(s), 0);
 
 const totalDeposits = () =>
-  DB.tenancies.filter(t => t.status === 'active').reduce((s, t) => s + num(t.deposit), 0);
+  DB.tenancies.filter(LIVE).reduce((s, t) => s + num(t.deposit), 0);
 
 // 账户余额折成马币。两个支付宝都是人民币，所以这里必然经过汇率。
 function accountsInRM() {
@@ -268,7 +273,7 @@ function futureIncome(months = 12) {
     const ym = addMonthsYM(thisYM(), i);
     let total = 0;
     for (const t of DB.tenancies) {
-      if (t.status === 'active' && isDue(t, ym)) total += rentFor(t, ym);
+      if (LIVE(t) && isDue(t, ym)) total += rentFor(t, ym);
     }
     out.push({ ym, total });
   }
@@ -326,7 +331,7 @@ function viewDashboard() {
 
   // 欠租
   const arrears = DB.tenancies
-    .filter(t => t.status === 'active')
+    .filter(LIVE)
     .map(t => ({ t, ...arrearsOf(t) }))
     .filter(x => x.amount > 0)
     .sort((a, b) => b.amount - a.amount);
@@ -334,6 +339,8 @@ function viewDashboard() {
 
   const fullRent = DB.tenancies.filter(t => t.status === 'active')
     .reduce((s, t) => s + num(t.monthly_rent), 0);
+  const booked = DB.tenancies.filter(t => t.status === 'booked')
+    .sort((a, b) => a.contract_start.localeCompare(b.contract_start));
 
   return `
   <div class="card">
@@ -398,7 +405,10 @@ function viewDashboard() {
       return `<div class="collect-row">
         <div class="left">
           <div class="who">${esc(p?.name || '')} · ${esc(room.name)}</div>
-          <div class="sub">${esc(st.tenancy.tenant_name)} · ${st.tenancy.contract_end} · ${rm(st.tenancy.monthly_rent)}/月</div>
+          <div class="sub">${esc(st.tenancy.tenant_name)} · ${st.tenancy.contract_end} · ${rm(st.tenancy.monthly_rent)}/月${
+            bookedTenancy(room.id)
+              ? ` · <span style="color:var(--good)">已有下一位 ${bookedTenancy(room.id).contract_start.slice(5)}</span>`
+              : ' · <span style="color:var(--bad)">还没找到下一位</span>'}</div>
         </div>
         <span class="pill ${st.cls}">${esc(st.label)}</span>
       </div>`;
@@ -407,6 +417,30 @@ function viewDashboard() {
       涉及月租合计 <b>${rm(expiring.reduce((s, x) => s + num(x.st.tenancy.monthly_rent), 0))}</b>，
       押金合计 <b>${rm(expiring.reduce((s, x) => s + num(x.st.tenancy.deposit), 0))}</b>
     </div>
+  </div>` : ''}
+
+  ${booked.length ? `
+  <div class="card">
+    <h2>已预订 <span class="sub">合约还没开始</span></h2>
+    ${booked.map(b => {
+      const room = DB.rooms.find(r => r.id === b.room_id);
+      const prop = propertyOf(b.room_id);
+      const prev = activeTenancy(b.room_id);
+      // 上一位走了到下一位来之间空几天
+      const gap = prev ? daysBetween(prev.contract_end, b.contract_start) - 1 : null;
+      return `<button class="row" data-room="${b.room_id}">
+        <div class="row-top">
+          <span class="row-name">${esc(b.tenant_name)}</span>
+          <span class="row-rent">${rm(b.monthly_rent)}</span>
+        </div>
+        <div class="row-meta">
+          <span>${esc(prop?.name || '')} · ${esc(room?.name || '')}</span>
+          <span class="muted">${b.contract_start} ~ ${b.contract_end}</span>
+          <span class="pill warn plain">押金 ${rm(b.deposit)} 已收</span>
+          ${gap > 0 ? `<span class="pill bad">中间空 ${gap} 天 · 少收 ${rm(num(b.monthly_rent) * gap / 30)}</span>` : ''}
+        </div>
+      </button>`;
+    }).join('')}
   </div>` : ''}
 
   ${arrears.length ? `
@@ -583,6 +617,7 @@ function viewRooms() {
           <span>${t ? esc(t.tenant_name) : '<span class="muted">无租客</span>'}</span>
           ${t ? `<span class="muted">到期 ${t.contract_end}</span>` : ''}
           <span class="pill ${st.cls}">${esc(st.label)}</span>
+          ${bookedTenancy(room.id) ? `<span class="pill warn plain">已排期 ${bookedTenancy(room.id).contract_start.slice(5)}</span>` : ''}
           ${(room.tags || []).map(g => `<span class="tag">${esc(g)}</span>`).join('')}
         </div>
       </button>`;
@@ -616,6 +651,7 @@ function viewRoomDetail() {
   const p = DB.properties.find(x => x.id === room.property_id);
   const st = roomStatus(room);
   const t = st.tenancy;
+  const bk = bookedTenancy(room.id);
   const ar = t ? arrearsOf(t) : { months: [], amount: 0 };
 
   const history = DB.tenancies
@@ -633,9 +669,11 @@ function viewRoomDetail() {
       欠租 <b>${rm(ar.amount)}</b>（${ar.months.length} 个月，${ymLabel(ar.months[0])} 起）</div>` : ''}
   </div>
 
-  ${t ? tenancyFormHTML(t, room) : newTenantFormHTML(room)}
+  ${t ? tenancyFormHTML(t, room) : newTenantFormHTML(room, 'active')}
   ${t ? calendarHTML(t) : ''}
   ${t ? backfillHTML(t) : ''}
+  ${bk ? bookedCardHTML(bk, room) + calendarHTML(bk, '预付租金记录') : ''}
+  ${t && !bk ? newTenantFormHTML(room, 'booked') : ''}
 
   ${history.length ? `<div class="card"><h2>历史房客 <span class="sub">${history.length} 位</span></h2>
     ${history.map(h => `<div class="collect-row"><div class="left">
@@ -655,68 +693,133 @@ function viewRoomDetail() {
   </div>`;
 }
 
+function tenancyFields(v) {
+  v = v || {};
+  return `
+    <div class="field"><label>房客姓名</label>
+      <input name="tname" type="text" value="${esc(v.tenant_name || '')}" required></div>
+    <div class="field"><label>电话</label>
+      <input name="phone" type="tel" value="${esc(v.phone || '')}" placeholder="0123456789"></div>
+    <div class="field"><label>月租 (RM)</label>
+      <input name="rent" type="number" step="50" value="${v.monthly_rent ?? ''}" required></div>
+    <div class="field"><label>押金 (RM)</label>
+      <input name="dep" type="number" step="50" value="${v.deposit ?? ''}"></div>
+    <div class="field"><label>押金实收人民币</label>
+      <input name="depcny" type="number" step="0.01" value="${v.deposit_cny ?? ''}" placeholder="收马币就留空">
+      <div class="hint">押金若用支付宝收，填这里才算得出汇兑盈亏</div></div>
+    <div class="field"><label>合约开始</label>
+      <input name="start" type="date" value="${v.contract_start || ''}" required></div>
+    <div class="field"><label>合约结束</label>
+      <input name="end" type="date" value="${v.contract_end || ''}" required></div>
+    <div class="field"><label>每月几号收租</label>
+      <input name="due" type="number" min="1" max="28" value="${v.rent_due_day || 1}"></div>
+    <div class="field"><label>首月租金 (RM)</label>
+      <input name="first" type="number" step="50" value="${v.first_month_rent ?? ''}" placeholder="留空 = 全额">
+      <div class="hint">月中入住只收部分时填，只影响入住那个月</div></div>
+    <div class="field wide"><label>备注</label>
+      <input name="notes" type="text" value="${esc(v.notes || '')}"></div>`;
+}
+
+function readTenancy(f) {
+  const e = f.elements;
+  return {
+    tenant_name: e.tname.value.trim(),
+    phone: e.phone.value.trim(),
+    monthly_rent: Number(e.rent.value) || 0,
+    deposit: Number(e.dep.value) || 0,
+    deposit_cny: e.depcny.value === '' ? null : Number(e.depcny.value),
+    contract_start: e.start.value,
+    contract_end: e.end.value,
+    rent_due_day: Math.min(Math.max(Number(e.due.value) || 1, 1), 28),
+    first_month_rent: e.first.value === '' ? null : Number(e.first.value),
+    notes: e.notes.value.trim(),
+  };
+}
+
 function tenancyFormHTML(t, room) {
   const wa = t.phone ? waLink(t.phone, t, room) : null;
   return `
   <div class="card">
     <h2>房客资料 ${wa ? `<a class="linkish" href="${wa}" target="_blank" rel="noopener">WhatsApp 催租</a>` : ''}</h2>
-    <form id="tenancy-form" class="form" data-id="${t.id}">
-      <div class="field"><label for="t-name">姓名</label><input type="text" id="t-name" value="${esc(t.tenant_name)}" required></div>
-      <div class="field"><label for="t-phone">电话</label><input type="tel" id="t-phone" value="${esc(t.phone)}" placeholder="0123456789"></div>
-      <div class="field"><label for="t-rent">月租 (RM)</label><input type="number" id="t-rent" step="50" value="${num(t.monthly_rent)}" required></div>
-      <div class="field"><label for="t-dep">押金 (RM)</label><input type="number" id="t-dep" step="50" value="${num(t.deposit)}"></div>
-      <div class="field"><label for="t-start">合约开始</label><input type="date" id="t-start" value="${t.contract_start}" required></div>
-      <div class="field"><label for="t-end">合约结束</label><input type="date" id="t-end" value="${t.contract_end}" required></div>
-      <div class="field"><label for="t-due">每月几号收租</label>
-        <input type="number" id="t-due" min="1" max="28" value="${dueDay(t)}">
-        <div class="hint">默认 1 号。上限 28，因为 2 月没有 29 号之后</div></div>
-      <div class="field"><label for="t-first">首月租金 (RM)</label>
-        <input type="number" id="t-first" step="50" value="${t.first_month_rent ?? ''}" placeholder="留空 = 全额">
-        <div class="hint">月中入住只收部分时填这里，只影响 ${t.contract_start.slice(0,7)} 那个月</div></div>
-      <div class="field wide"><label for="t-notes">备注</label><textarea id="t-notes">${esc(t.notes)}</textarea></div>
+    <form class="form tenancy-edit" data-id="${t.id}">
+      ${tenancyFields(t)}
       <div class="actions wide"><button type="submit" class="primary">保存</button></div>
     </form>
   </div>`;
 }
 
-function newTenantFormHTML(room) {
+// 登记新房客。room 还有人住时只能登记为「已预订」。
+function newTenantFormHTML(room, mode) {
+  const booking = mode === 'booked';
   return `
   <div class="card">
-    <h2>登记新房客</h2>
-    <form id="new-tenancy-form" class="form" data-room="${room.id}">
-      <div class="field"><label for="t-name">姓名</label><input type="text" id="t-name" required></div>
-      <div class="field"><label for="t-phone">电话</label><input type="tel" id="t-phone" placeholder="0123456789"></div>
-      <div class="field"><label for="t-rent">月租 (RM)</label><input type="number" id="t-rent" step="50" value="${num(room.reference_rent) || ''}" required></div>
-      <div class="field"><label for="t-dep">押金 (RM)</label><input type="number" id="t-dep" step="50"></div>
-      <div class="field"><label for="t-start">合约开始</label><input type="date" id="t-start" value="${todayISO()}" required></div>
-      <div class="field"><label for="t-end">合约结束</label><input type="date" id="t-end" required></div>
-      <div class="field"><label for="t-due">每月几号收租</label>
-        <input type="number" id="t-due" min="1" max="28" value="1"></div>
-      <div class="field"><label for="t-first">首月租金 (RM)</label>
-        <input type="number" id="t-first" step="50" placeholder="留空 = 全额">
-        <div class="hint">月中入住只收部分时填</div></div>
-      <div class="actions wide"><button type="submit" class="primary">登记</button></div>
+    <h2>${booking ? '登记下一位房客（预订）' : '登记新房客'}</h2>
+    ${booking ? `<p class="muted" style="margin:0 0 12px;font-size:13.5px">
+      这间房现在还有人住。合约开始前它算「已预订」：押金计入你手上的钱、
+      未来收入推算也算数，但不影响本月收租。上一位标记搬走时会自动转为在住。
+    </p>` : ''}
+    <form class="form tenancy-new" data-room="${room.id}" data-status="${booking ? 'booked' : 'active'}">
+      ${tenancyFields({ contract_start: booking ? '' : todayISO(),
+                        monthly_rent: num(room.reference_rent) || '' })}
+      <div class="actions wide"><button type="submit" class="primary">${booking ? '登记预订' : '登记'}</button></div>
     </form>
   </div>`;
 }
 
-function calendarHTML(t) {
+// 已预订的下一位房客：可编辑、可记预付租金、可转为在住、可取消
+function bookedCardHTML(t, room) {
+  const days = daysUntil(t.contract_start);
+  const prepaid = DB.payments.filter(p => p.tenancy_id === t.id);
+  const prepaidRM = prepaid.reduce((s, p) => s + (p.amount == null ? rentFor(t, p.ym) : num(p.amount)), 0);
+  const prepaidCNY = prepaid.reduce((s, p) => s + num(p.cny_amount), 0);
+  // 押金和预付租金常常是一笔钱付的，要合起来才算得出真实汇率
+  const totalRM = num(t.deposit) + prepaidRM;
+  const totalCNY = num(t.deposit_cny) + prepaidCNY;
+  return `
+  <div class="card" style="border-color:var(--warn)">
+    <h2>下一位房客 <span class="pill warn">${t.contract_start} 起 · 还有 ${days} 天</span></h2>
+    <div class="stat-grid" style="margin-bottom:14px">
+      <div class="stat"><div class="k">押金已收</div><div class="v">${rm(t.deposit)}</div>
+        ${num(t.deposit_cny) > 0 ? `<div class="n">${cny(t.deposit_cny)}</div>` : ''}</div>
+      <div class="stat"><div class="k">预付租金</div><div class="v">${rm(prepaidRM)}</div>
+        ${prepaidCNY > 0 ? `<div class="n">${cny(prepaidCNY)}</div>` : ''}</div>
+    </div>
+    ${totalCNY > 0 ? `<div class="banner warn" style="margin:0 0 14px">
+      合计已收 <b>${rm(totalRM)}</b> = ${cny(totalCNY)}，实际汇率 <b>${(totalRM / totalCNY).toFixed(4)}</b>${
+        (totalRM / totalCNY) < fxRate()
+          ? `，比你设定的 ${fxRate()} 低，这笔少换了约 ${rm(totalCNY * (fxRate() - totalRM / totalCNY))}。`
+          : '。'}
+    </div>` : ''}
+    <form class="form tenancy-edit" data-id="${t.id}">
+      ${tenancyFields(t)}
+      <div class="actions wide">
+        <button type="submit" class="primary">保存</button>
+        <button type="button" class="ghost" data-promote="${t.id}">转为在住</button>
+        <button type="button" class="danger" data-cancelbook="${t.id}">取消预订</button>
+      </div>
+    </form>
+  </div>`;
+}
+
+function calendarHTML(t, title) {
+  const booked = t.status === 'booked';
   const startY = Number(t.contract_start.slice(0, 4));
-  const maxY = thisYear();
+  const maxY = booked ? Number(t.contract_end.slice(0, 4)) : thisYear();
   const y = UI.year;
   const cells = [];
   for (let m = 1; m <= 12; m++) {
     const ym = `${y}-${pad2(m)}`;
-    if (!isDue(t, ym) || ym > thisYM()) {
+    // 预订租约允许提前打勾（房客常常预付首月租金）
+    if (!isDue(t, ym) || (!booked && ym > thisYM())) {
       cells.push(`<button class="mo na" disabled>${m}月<br>—</button>`);
     } else {
       const paid = !!paymentOf(t.id, ym);
-      cells.push(`<button class="mo ${paid ? 'paid' : 'due'}" data-mo="${ym}" data-tenancy="${t.id}">${m}月<br>${paid ? '✓ 已收' : '✕ 未收'}</button>`);
+      cells.push(`<button class="mo ${paid ? 'paid' : (booked ? '' : 'due')}" data-mo="${ym}" data-tenancy="${t.id}">${m}月<br>${paid ? '✓ 已收' : (booked ? '未收' : '✕ 未收')}</button>`);
     }
   }
   return `
   <div class="card">
-    <h2>收租记录</h2>
+    <h2>${esc(title || '收租记录')}</h2>
     <div class="yearnav">
       <button ${y <= startY ? 'disabled' : ''} data-year="-1">←</button>
       <span class="num" style="font-weight:600">${y}</span>
@@ -945,13 +1048,22 @@ function armDanger(btn, onConfirm) {
 }
 
 document.addEventListener('click', async ev => {
-  const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay],[data-airtick]');
+  const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay],[data-airtick],[data-promote],[data-cancelbook]');
   if (!el) return;
   const d = el.dataset;
 
   if (d.tab)   { UI.tab = d.tab; UI.roomId = null; render(); return; }
   if (d.back)  { UI.roomId = null; render(); return; }
   if (d.room)  { UI.roomId = d.room; UI.tab = 'rooms'; UI.year = thisYear(); render(); return; }
+  if (d.promote) {
+    armDanger(el, () => write(() => sb.from('tenancies')
+      .update({ status: 'active' }).eq('id', d.promote), '已转为在住'));
+    return;
+  }
+  if (d.cancelbook) {
+    armDanger(el, () => write(() => sb.from('tenancies').delete().eq('id', d.cancelbook), '预订已取消'));
+    return;
+  }
   if (d.close) { render(); return; }
   if (d.year)  { UI.year += Number(d.year); render(); return; }
 
@@ -1007,8 +1119,17 @@ document.addEventListener('click', async ev => {
   }
 
   if (d.moveout) {
-    armDanger(el, () => write(() => sb.from('tenancies')
-      .update({ status: 'ended', move_out_date: todayISO() }).eq('id', d.moveout), '已标记搬走'));
+    armDanger(el, async () => {
+      const gone = DB.tenancies.find(x => x.id === d.moveout);
+      const next = gone && bookedTenancy(gone.room_id);
+      const ok = await write(() => sb.from('tenancies')
+        .update({ status: 'ended', move_out_date: todayISO() }).eq('id', d.moveout), '已标记搬走');
+      // 有预订的下一位就自动接上，免得房间显示成空的
+      if (ok && next) {
+        await write(() => sb.from('tenancies').update({ status: 'active' }).eq('id', next.id),
+          `${next.tenant_name} 已转为在住`);
+      }
+    });
     return;
   }
 
@@ -1057,33 +1178,17 @@ document.addEventListener('submit', async ev => {
     return;
   }
 
-  if (f.id === 'tenancy-form') {
-    await write(() => sb.from('tenancies').update({
-      tenant_name: $('#t-name').value.trim(),
-      phone: $('#t-phone').value.trim(),
-      monthly_rent: Number($('#t-rent').value) || 0,
-      deposit: Number($('#t-dep').value) || 0,
-      contract_start: $('#t-start').value,
-      contract_end: $('#t-end').value,
-      rent_due_day: Math.min(Math.max(Number($('#t-due').value) || 1, 1), 28),
-      first_month_rent: $('#t-first').value === '' ? null : Number($('#t-first').value),
-      notes: $('#t-notes').value.trim(),
-    }).eq('id', f.dataset.id), '已保存');
+  if (f.classList.contains('tenancy-edit')) {
+    await write(() => sb.from('tenancies').update(readTenancy(f)).eq('id', f.dataset.id), '已保存');
     return;
   }
 
-  if (f.id === 'new-tenancy-form') {
+  if (f.classList.contains('tenancy-new')) {
     await write(() => sb.from('tenancies').insert({
       room_id: f.dataset.room,
-      tenant_name: $('#t-name').value.trim(),
-      phone: $('#t-phone').value.trim(),
-      monthly_rent: Number($('#t-rent').value) || 0,
-      deposit: Number($('#t-dep').value) || 0,
-      contract_start: $('#t-start').value,
-      contract_end: $('#t-end').value,
-      rent_due_day: Math.min(Math.max(Number($('#t-due').value) || 1, 1), 28),
-      first_month_rent: $('#t-first').value === '' ? null : Number($('#t-first').value),
-    }), '已登记');
+      status: f.dataset.status,
+      ...readTenancy(f),
+    }), f.dataset.status === 'booked' ? '预订已登记' : '已登记');
     return;
   }
 
