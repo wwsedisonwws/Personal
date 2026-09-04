@@ -54,9 +54,12 @@ Bayan + Perling 两处房产、11 间房的租务管理网站。
 
 ### 4. 开 GitHub Pages
 
-仓库 **Settings → Pages** → Source 选 **Deploy from a branch** → 分支 `main`、目录 `/ (root)` → Save。
+仓库 **Settings → Pages** → Source 选 **Deploy from a branch** →
+分支选**默认分支**（本仓库是 `claude/who-am-i-y860pz`，没有 `main`）、目录 `/ (root)` → Save。
 
 一两分钟后网站在：`https://wwsedisonwws.github.io/Personal/`
+
+> Pages 可以从任何分支部署，不限于 `main`。定时任务（保活）则只在**默认分支**上运行。
 
 ### 5. 告诉 Supabase 登录后跳回哪里 ← 最容易漏
 
@@ -106,14 +109,12 @@ curl "https://你的项目.supabase.co/rest/v1/tenancies?select=*" \
 
 ## 待办
 
-- [ ] 核对三处租金。现有数据是从旧系统搬过来的，跟你说过的对不上：
-      Bayan 一楼小房 RM900（你说 1,400）、三楼小房 RM1,400（你说 900）—— 这两个刚好对调，
-      八成当初录反了；Perling 一楼大房 RM1,600（你说 2,000）。在「房间」页直接改。
-- [ ] 设定两个租客的收租日（19 号、25 号）。其余默认 1 号，在「房间」页每个房客的资料里改。
+- [x] ~~核对三处租金~~ —— 已确认，系统里的值就是对的：
+      Bayan 一楼小房 RM900、三楼小房 RM1,400、Perling 一楼大房 RM1,600。
+- [x] ~~设定收租日~~ —— WeiQing 19 号、JingXuan 25 号，其余 1 号。
 - [ ] 补房客电话。现在全是空的，填了才能用 WhatsApp 催租。
 - [ ] 更新两个支付宝的余额，押金覆盖率才准。
-- [ ] 处理历史欠租。旧系统只勾了 2026 年 8 月，所以之前的月份都算「未收」（合计 RM61,500）。
-      如果那些其实收过了，进房间详情用**批量补记**一次清掉。
+- [x] ~~处理历史欠租~~ —— 已在网站上逐间打勾清掉。
 
 ## 文件
 
