@@ -970,17 +970,31 @@ function viewMoney() {
 
   <div class="card">
     <h2>账户余额 <span class="sub">手动更新</span></h2>
-    ${DB.accounts.length ? DB.accounts.map(a => `
-      <form class="collect-row acct-form" data-id="${a.id}">
-        <div class="left">
-          <div class="who">${esc(a.name)}</div>
-          <div class="sub">${a.currency}${a.balance_updated_at ? ` · 更新于 ${a.balance_updated_at.slice(0, 10)}` : ' · 从未更新'}</div>
-        </div>
-        <div style="display:flex;gap:8px;align-items:center;flex:0 0 auto">
-          <input type="number" step="0.01" value="${num(a.balance)}" style="width:120px;font-size:16px;padding:7px 9px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text)">
-          <button type="submit" class="ghost">存</button>
+    ${DB.accounts.length ? DB.accounts.map((a, i) => `
+      <form class="form acct-form" data-id="${a.id}"
+        style="${i ? 'border-top:1px solid var(--border);padding-top:16px;margin-top:16px' : ''}">
+        <div class="field"><label>账户名称</label>
+          <input name="name" type="text" value="${esc(a.name)}" required></div>
+        <div class="field"><label>余额（${a.currency}）</label>
+          <input name="balance" type="number" step="0.01" value="${num(a.balance)}"></div>
+        <div class="field"><label>币种</label>
+          <select name="currency">
+            <option value="CNY" ${a.currency === 'CNY' ? 'selected' : ''}>CNY 人民币</option>
+            <option value="MYR" ${a.currency === 'MYR' ? 'selected' : ''}>MYR 马币</option>
+          </select></div>
+        <div class="field"><label>备注</label>
+          <input name="note" type="text" value="${esc(a.note || '')}" placeholder="可留空"></div>
+        <div class="actions wide">
+          <button type="submit" class="primary">保存</button>
+          <button type="button" class="danger" data-delacct="${a.id}">删除账户</button>
+          <span class="muted" style="font-size:12px">${
+            a.balance_updated_at ? `余额更新于 ${a.balance_updated_at.slice(0, 10)}` : '余额从未更新'}</span>
         </div>
       </form>`).join('') : '<div class="empty">还没有账户，用下面的表单加两个支付宝。</div>'}
+
+    <div class="hint muted" style="margin-top:14px;font-size:12px">
+      删除账户不会动到收租记录 —— 那些记录只会变成「没有指定账户」，金额和日期都还在。
+    </div>
 
     <form id="acct-new" class="form" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
       <div class="field"><label for="a-name">新增账户名</label><input type="text" id="a-name" placeholder="支付宝 A" required></div>
@@ -1048,7 +1062,7 @@ function armDanger(btn, onConfirm) {
 }
 
 document.addEventListener('click', async ev => {
-  const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay],[data-airtick],[data-promote],[data-cancelbook]');
+  const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay],[data-airtick],[data-promote],[data-cancelbook],[data-delacct]');
   if (!el) return;
   const d = el.dataset;
 
@@ -1146,6 +1160,11 @@ document.addEventListener('click', async ev => {
     if (!a) { toast('先填金额再打勾'); return; }
     await write(() => sb.from('aircon_charges')
       .update({ paid: !a.paid, paid_on: a.paid ? null : todayISO() }).eq('id', a.id));
+    return;
+  }
+
+  if (d.delacct) {
+    armDanger(el, () => write(() => sb.from('accounts').delete().eq('id', d.delacct), '账户已删除'));
     return;
   }
 
@@ -1259,10 +1278,19 @@ document.addEventListener('submit', async ev => {
   }
 
   if (f.classList.contains('acct-form')) {
-    const val = Number($('input', f).value) || 0;
-    await write(() => sb.from('accounts')
-      .update({ balance: val, balance_updated_at: new Date().toISOString() })
-      .eq('id', f.dataset.id), '余额已更新');
+    const e = f.elements;
+    const a = DB.accounts.find(x => x.id === f.dataset.id);
+    const bal = Number(e.balance.value) || 0;
+    const patch = {
+      name: e.name.value.trim(),
+      currency: e.currency.value,
+      balance: bal,
+      note: e.note.value.trim(),
+    };
+    // 只有余额真的变了才刷新时间戳。否则改个名字也把「更新于」刷新，
+    // 就看不出余额到底多久没对过了。
+    if (a && bal !== num(a.balance)) patch.balance_updated_at = new Date().toISOString();
+    await write(() => sb.from('accounts').update(patch).eq('id', f.dataset.id), '已保存');
     return;
   }
 
