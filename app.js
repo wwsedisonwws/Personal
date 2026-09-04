@@ -131,9 +131,15 @@ function dueMonths(t, uptoYM = thisYM()) {
 const isDue = (t, ym) =>
   ym >= t.contract_start.slice(0, 7) && ym <= t.contract_end.slice(0, 7);
 
+// 某个月应收多少。首月若谈好按比例少收（如月中入住），用 first_month_rent。
+function rentFor(t, ym) {
+  const isFirst = ym === t.contract_start.slice(0, 7);
+  return isFirst && t.first_month_rent != null ? num(t.first_month_rent) : num(t.monthly_rent);
+}
+
 const paidAmount = (t, ym) => {
   const p = paymentOf(t.id, ym);
-  return p ? (p.amount == null ? num(t.monthly_rent) : num(p.amount)) : 0;
+  return p ? (p.amount == null ? rentFor(t, ym) : num(p.amount)) : 0;
 };
 
 // 这份租约某个月的实际收租日。有人 1 号交，有人 19 号、25 号。
@@ -166,7 +172,7 @@ function rentState(t, ym) {
 function arrearsOf(t) {
   // 只算已经过了收租日的月份
   const unpaid = dueMonths(t).filter(ym => !paymentOf(t.id, ym) && isPastDue(t, ym));
-  return { months: unpaid, amount: unpaid.length * num(t.monthly_rent) };
+  return { months: unpaid, amount: unpaid.reduce((sum, ym) => sum + rentFor(t, ym), 0) };
 }
 
 /* -------- 空调费：每月一行，金额随电单变动，跟租金分开打勾 -------- */
@@ -210,9 +216,9 @@ function monthProgress(ym = thisYM()) {
   let due = 0, got = 0, rooms = 0, done = 0, overdue = 0, overdueAmt = 0;
   for (const t of DB.tenancies) {
     if (t.status !== 'active' || !isDue(t, ym)) continue;
-    rooms++; due += num(t.monthly_rent);
+    rooms++; due += rentFor(t, ym);
     if (paymentOf(t.id, ym)) { done++; got += paidAmount(t, ym); }
-    else if (isPastDue(t, ym)) { overdue++; overdueAmt += num(t.monthly_rent); }
+    else if (isPastDue(t, ym)) { overdue++; overdueAmt += rentFor(t, ym); }
   }
   return { due, got, rooms, done, overdue, overdueAmt, outstanding: due - got };
 }
@@ -249,7 +255,7 @@ function impliedRate() {
   let rmSum = 0, cnySum = 0;
   for (const p of rows) {
     const t = DB.tenancies.find(x => x.id === p.tenancy_id);
-    rmSum += p.amount == null ? num(t?.monthly_rent) : num(p.amount);
+    rmSum += p.amount == null ? (t ? rentFor(t, p.ym) : 0) : num(p.amount);
     cnySum += num(p.cny_amount);
   }
   return cnySum > 0 ? { rate: rmSum / cnySum, n: rows.length } : null;
@@ -262,7 +268,7 @@ function futureIncome(months = 12) {
     const ym = addMonthsYM(thisYM(), i);
     let total = 0;
     for (const t of DB.tenancies) {
-      if (t.status === 'active' && isDue(t, ym)) total += num(t.monthly_rent);
+      if (t.status === 'active' && isDue(t, ym)) total += rentFor(t, ym);
     }
     out.push({ ym, total });
   }
@@ -277,7 +283,7 @@ function pastIncome(months = 12) {
     let rent = 0;
     for (const p of DB.payments.filter(p => p.ym === ym)) {
       const t = DB.tenancies.find(x => x.id === p.tenancy_id);
-      rent += p.amount == null ? num(t?.monthly_rent) : num(p.amount);
+      rent += p.amount == null ? (t ? rentFor(t, p.ym) : 0) : num(p.amount);
     }
     out.push({ ym, rent, stay: stayIncomeOf(ym) });
   }
@@ -443,11 +449,13 @@ function viewCollect() {
       const rs = rentState(t, ym);
       const pay = paymentOf(t.id, ym);
       const extra = pay && num(pay.cny_amount) > 0 ? ` · 支付宝 ${cny(pay.cny_amount)}` : '';
+      const owed = rentFor(t, ym);
+      const partial = owed !== num(t.monthly_rent) ? ' <span class="tag">首月按比例</span>' : '';
       const sub = rs.key === 'waiting'
-        ? `${rm(t.monthly_rent)} · <span class="muted">${dueDay(t)} 号收，${rs.note}</span>`
+        ? `${rm(owed)}${partial} · <span class="muted">${dueDay(t)} 号收，${rs.note}</span>`
         : rs.key === 'late'
-          ? `${rm(t.monthly_rent)} · <span style="color:var(--bad)">${rs.label}</span>`
-          : `${rm(t.monthly_rent)}${extra}`;
+          ? `${rm(owed)}${partial} · <span style="color:var(--bad)">${rs.label}</span>`
+          : `${rm(owed)}${partial}${extra}`;
       return `<div class="collect-row">
         <div class="left">
           <div class="who">${esc(room.name)} · ${esc(t.tenant_name)}</div>
@@ -528,7 +536,7 @@ function payDialogHTML(t) {
     <form id="pay-form" class="form" data-tenancy="${t.id}">
       <div class="field">
         <label for="p-amount">应收马币</label>
-        <input type="number" id="p-amount" step="10" value="${pay.amount ?? num(t.monthly_rent)}">
+        <input type="number" id="p-amount" step="10" value="${pay.amount ?? rentFor(t, ym)}">
         <div class="hint">默认就是月租，通常不用改</div>
       </div>
       <div class="field">
@@ -662,6 +670,9 @@ function tenancyFormHTML(t, room) {
       <div class="field"><label for="t-due">每月几号收租</label>
         <input type="number" id="t-due" min="1" max="28" value="${dueDay(t)}">
         <div class="hint">默认 1 号。上限 28，因为 2 月没有 29 号之后</div></div>
+      <div class="field"><label for="t-first">首月租金 (RM)</label>
+        <input type="number" id="t-first" step="50" value="${t.first_month_rent ?? ''}" placeholder="留空 = 全额">
+        <div class="hint">月中入住只收部分时填这里，只影响 ${t.contract_start.slice(0,7)} 那个月</div></div>
       <div class="field wide"><label for="t-notes">备注</label><textarea id="t-notes">${esc(t.notes)}</textarea></div>
       <div class="actions wide"><button type="submit" class="primary">保存</button></div>
     </form>
@@ -681,6 +692,9 @@ function newTenantFormHTML(room) {
       <div class="field"><label for="t-end">合约结束</label><input type="date" id="t-end" required></div>
       <div class="field"><label for="t-due">每月几号收租</label>
         <input type="number" id="t-due" min="1" max="28" value="1"></div>
+      <div class="field"><label for="t-first">首月租金 (RM)</label>
+        <input type="number" id="t-first" step="50" placeholder="留空 = 全额">
+        <div class="hint">月中入住只收部分时填</div></div>
       <div class="actions wide"><button type="submit" class="primary">登记</button></div>
     </form>
   </div>`;
@@ -743,7 +757,7 @@ function waLink(phone, t, room) {
   const ar = arrearsOf(t);
   const owed = ar.amount > 0
     ? `目前未收 ${ar.months.map(ymLabel).join('、')}，共 RM${ar.amount}。`
-    : `${ymLabel(thisYM())} 租金 RM${num(t.monthly_rent)}。`;
+    : `${ymLabel(thisYM())} 租金 RM${rentFor(t, thisYM())}。`;
   const msg = `你好 ${t.tenant_name}，${room.name} 的租金提醒：${owed}麻烦安排一下，谢谢！`;
   return `https://wa.me/${n}?text=${encodeURIComponent(msg)}`;
 }
@@ -957,7 +971,7 @@ document.addEventListener('click', async ev => {
       await write(() => sb.from('payments').delete().eq('id', existing.id), '已取消');
     } else {
       await write(() => sb.from('payments').insert({
-        tenancy_id: t.id, ym, amount: num(t.monthly_rent), paid_on: todayISO(),
+        tenancy_id: t.id, ym, amount: rentFor(t, ym), paid_on: todayISO(),
       }), `已收 ${t.tenant_name}`);
     }
     return;
@@ -969,7 +983,7 @@ document.addEventListener('click', async ev => {
     const existing = paymentOf(t.id, d.mo);
     if (existing) await write(() => sb.from('payments').delete().eq('id', existing.id), '已取消');
     else await write(() => sb.from('payments').insert({
-      tenancy_id: t.id, ym: d.mo, amount: num(t.monthly_rent),
+      tenancy_id: t.id, ym: d.mo, amount: rentFor(t, d.mo),
     }), `已标记 ${ymLabel(d.mo)}`);
     return;
   }
@@ -985,7 +999,7 @@ document.addEventListener('click', async ev => {
     if (!targets.length) { toast('没有需要补记的月份'); return; }
     armDanger(el, async () => {
       await write(() => sb.from('payments').insert(
-        targets.map(ym => ({ tenancy_id: t.id, ym, amount: num(t.monthly_rent), note: '批量补记' }))
+        targets.map(ym => ({ tenancy_id: t.id, ym, amount: rentFor(t, ym), note: '批量补记' }))
       ), `补记了 ${targets.length} 个月`);
     });
     if (el.dataset.armed === '1') toast(`将补记 ${targets.length} 个月，再点一次确认`);
@@ -1052,6 +1066,7 @@ document.addEventListener('submit', async ev => {
       contract_start: $('#t-start').value,
       contract_end: $('#t-end').value,
       rent_due_day: Math.min(Math.max(Number($('#t-due').value) || 1, 1), 28),
+      first_month_rent: $('#t-first').value === '' ? null : Number($('#t-first').value),
       notes: $('#t-notes').value.trim(),
     }).eq('id', f.dataset.id), '已保存');
     return;
@@ -1067,6 +1082,7 @@ document.addEventListener('submit', async ev => {
       contract_start: $('#t-start').value,
       contract_end: $('#t-end').value,
       rent_due_day: Math.min(Math.max(Number($('#t-due').value) || 1, 1), 28),
+      first_month_rent: $('#t-first').value === '' ? null : Number($('#t-first').value),
     }), '已登记');
     return;
   }
