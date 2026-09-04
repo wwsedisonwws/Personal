@@ -58,7 +58,7 @@ const paidFor = (db: DB, tenancyId: string, ym: string) =>
   db.payments.some(p => p.tenancy_id === tenancyId && p.ym === ym);
 
 // 他走后第二天这间房还有没有人。
-// 不能只看「有没有人在他之后开始」—— zhengyu 住到 10-31 而 Hansen 10-15 就进同一间，
+// 不能只看「有没有人在他之后开始」—— 租客A 住到 10-31 而 租客B 10-15 就进同一间，
 // 那是重叠不是接替；也不能按月粒度判断。
 export function successorOf(db: DB, t: Row) {
   const after = addDays(t.contract_end, 1);

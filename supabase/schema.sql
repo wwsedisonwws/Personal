@@ -51,7 +51,7 @@ create table if not exists public.tenancies (
   -- 每月几号交租。不是所有房客都 1 号交 —— 有人 19 号、有人 25 号。
   -- 上限 28，避免 2 月没有 29/30/31 号。
   rent_due_day   int  not null default 1 check (rent_due_day between 1 and 28),
-  -- 首月租金。月中入住时首月通常按比例少收（Hansen 10/15 入住，十月只收半个月）。
+  -- 首月租金。月中入住时首月通常按比例少收（租客B 10/15 入住，十月只收半个月）。
   -- 留空 = 首月照 monthly_rent 全额收。金额是谈好的，不是按天数算出来的，所以直接存。
   first_month_rent numeric(10,2),
   notes          text not null default '',

@@ -1,5 +1,7 @@
 # 房客姓名、电话属于第三方个人资料，绝不能进公开仓库。
 # git 历史清不干净，一旦推上去就是永久公开。
 supabase/seed.sql
+# 网站导出的备份，里面是全部房客资料。手滑放进仓库目录也不会被提交。
+rental-backup-*.json
 *.local.js
 .DS_Store
