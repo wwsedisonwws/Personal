@@ -977,29 +977,22 @@ function viewMoney() {
           <input name="name" type="text" value="${esc(a.name)}" required></div>
         <div class="field"><label>余额（${a.currency}）</label>
           <input name="balance" type="number" step="0.01" value="${num(a.balance)}"></div>
-        <div class="field"><label>币种</label>
-          <select name="currency">
-            <option value="CNY" ${a.currency === 'CNY' ? 'selected' : ''}>CNY 人民币</option>
-            <option value="MYR" ${a.currency === 'MYR' ? 'selected' : ''}>MYR 马币</option>
-          </select></div>
-        <div class="field"><label>备注</label>
-          <input name="note" type="text" value="${esc(a.note || '')}" placeholder="可留空"></div>
         <div class="actions wide">
           <button type="submit" class="primary">保存</button>
-          <button type="button" class="danger" data-delacct="${a.id}">删除账户</button>
+          <button type="button" class="danger" data-delacct="${a.id}">删除</button>
           <span class="muted" style="font-size:12px">${
             a.balance_updated_at ? `余额更新于 ${a.balance_updated_at.slice(0, 10)}` : '余额从未更新'}</span>
         </div>
-      </form>`).join('') : '<div class="empty">还没有账户，用下面的表单加两个支付宝。</div>'}
+      </form>`).join('') : '<div class="empty">还没有账户，用下面的表单加一个。</div>'}
 
     <div class="hint muted" style="margin-top:14px;font-size:12px">
       删除账户不会动到收租记录 —— 那些记录只会变成「没有指定账户」，金额和日期都还在。
     </div>
 
-    <form id="acct-new" class="form" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
-      <div class="field"><label for="a-name">新增账户名</label><input type="text" id="a-name" placeholder="支付宝 A" required></div>
-      <div class="field"><label for="a-cur">币种</label><select id="a-cur"><option>CNY</option><option>MYR</option></select></div>
-      <div class="actions wide"><button type="submit" class="ghost">新增账户</button></div>
+    <form id="acct-new" class="form" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px">
+      <div class="field wide"><label for="a-name">新增账户</label>
+        <input type="text" id="a-name" placeholder="账户名称" required></div>
+      <div class="actions wide"><button type="submit" class="ghost">新增</button></div>
     </form>
   </div>
 
@@ -1281,12 +1274,7 @@ document.addEventListener('submit', async ev => {
     const e = f.elements;
     const a = DB.accounts.find(x => x.id === f.dataset.id);
     const bal = Number(e.balance.value) || 0;
-    const patch = {
-      name: e.name.value.trim(),
-      currency: e.currency.value,
-      balance: bal,
-      note: e.note.value.trim(),
-    };
+    const patch = { name: e.name.value.trim(), balance: bal };
     // 只有余额真的变了才刷新时间戳。否则改个名字也把「更新于」刷新，
     // 就看不出余额到底多久没对过了。
     if (a && bal !== num(a.balance)) patch.balance_updated_at = new Date().toISOString();
@@ -1295,9 +1283,10 @@ document.addEventListener('submit', async ev => {
   }
 
   if (f.id === 'acct-new') {
+    // 币种不在界面上暴露 —— 账户都是人民币。栏位仍留在数据库里（默认 CNY），
+    // 日后真开了马币户口，把选单加回来即可，不必改表。
     await write(() => sb.from('accounts').insert({
       name: $('#a-name').value.trim(),
-      currency: $('#a-cur').value,
       sort_order: DB.accounts.length,
     }), '账户已新增');
     return;
