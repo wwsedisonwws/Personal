@@ -77,16 +77,16 @@ Bayan + Perling 两处房产、11 间房的租务管理网站。
 > `seed.sql` 含房客真实姓名，已经写进 `.gitignore`，**不会**进这个公开仓库。
 > 它只存在你本地。导完可以删掉。
 
-### 7. 防止项目自动暂停（可选但建议）
+### 7. 防止项目自动暂停（不用做，已自动）
 
-Supabase 免费版**闲置 7 天会暂停项目**。收租是月度动作，很容易撞上。
+Supabase 免费版**闲置 7 天会暂停项目**。收租是月度动作，中间二十几天没人访问，
+必然撞上 —— 到时候月初打开网站全是报错，得自己登后台点 Restore。
 
-仓库 **Settings → Secrets and variables → Actions** 加两个 secret：
+`.github/workflows/keepalive.yml` 每周一自动访问一次，项目就不会睡着。
+连接参数直接从 `config.js` 读，**不需要任何设置**。
 
-- `SUPABASE_URL` — 跟 config.js 里的一样
-- `SUPABASE_ANON_KEY` — 跟 config.js 里的一样
-
-加好后 `.github/workflows/keepalive.yml` 会每周一自动 ping 一次，项目就不会睡着。
+想确认它能跑：仓库 **Actions** → 左边选 **keepalive** → **Run workflow** 手动触发一次，
+绿勾就是正常。
 
 ## 怎么确认外人真的看不到
 

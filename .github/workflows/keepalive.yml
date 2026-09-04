@@ -1,32 +1,47 @@
 # Supabase 免费版闲置 7 天会自动暂停项目。
-# 收租是月度动作，等于每次打开都撞上暂停状态，要手动去后台唤醒。
-# 这个任务每周 ping 一次 REST 端点，让项目一直醒着。
+# 收租是月度动作，中间二十几天没人访问，必然触发 —— 到时候月初打开网站全是报错，
+# 得自己登后台点 Restore，每个月来一次。
+#
+# 这个任务每周一自动访问一次，让项目保持醒着。
+#
+# 连接参数直接从 config.js 读。那两个值本来就是公开的（anon key 设计如此，
+# 任何人打开网页都看得到），没必要再存一份 GitHub Secret 让人多做一步设置。
 name: keepalive
 
 on:
   schedule:
-    - cron: '17 3 * * 1'   # 每周一 03:17 UTC（马来西亚 11:17）
-  workflow_dispatch:        # 也可以在 Actions 页面手动触发
+    - cron: '17 3 * * 1'   # 每周一 03:17 UTC（马来西亚时间 11:17）
+  workflow_dispatch:        # 也可在 Actions 页面手动触发
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Supabase
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      - uses: actions/checkout@v4
+
+      - name: 从 config.js 读取连接参数
+        id: cfg
         run: |
-          if [ -z "$SUPABASE_URL" ]; then
-            echo "还没设 SUPABASE_URL secret，跳过。设置方法见 README。"
-            exit 0
-          fi
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
-            -H "apikey: $SUPABASE_ANON_KEY" \
-            "$SUPABASE_URL/rest/v1/")
+          node -e '
+            global.window = {};
+            require("./config.js");
+            const c = window.SUPABASE_CONFIG || {};
+            if (!c.url || c.url.includes("你的")) {
+              console.error("config.js 还没填好，跳过");
+              process.exit(78);
+            }
+            console.log(`url=${c.url}`);
+            console.log(`key=${c.anonKey}`);
+          ' >> "$GITHUB_OUTPUT"
+
+      - name: Ping Supabase
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+            -H "apikey: ${{ steps.cfg.outputs.key }}" \
+            "${{ steps.cfg.outputs.url }}/rest/v1/")
           echo "HTTP $code"
-          # 401 也算活着 —— 说明服务在跑，只是没带够凭证。
+          # 401 也算活着 —— 服务在跑，只是这个端点要求更完整的凭证。
           case "$code" in
-            200|401) echo "项目醒着 ✅" ;;
-            *) echo "异常，可能已暂停，去后台看看"; exit 1 ;;
+            200|401|404) echo "✅ 项目醒着" ;;
+            *) echo "❌ 异常，可能已暂停，去 Supabase 后台看看"; exit 1 ;;
           esac
