@@ -55,9 +55,14 @@ const UI = {
   tab: 'dash', roomId: null, year: thisYear(),
   openMonth: null,      // 租金推算图展开的月份
   openAcMonth: null,    // 空调费历史展开的月份（跟上面分开，否则两张图会互相收起）
-  acYM: null,           // 收租页正在录入的空调费月份，null = 当月
+  acYM: null,           // 收租页正在录入的空调费月份，null = 当前该处理的账单月
 };
-const acYM = () => UI.acYM || thisYM();
+
+// 空调费次月收：9 月收的是 8 月的电费。
+// aircon_charges.ym 一律指「电费所属月份」，收款时间看 paid_on，两者分开。
+// 所以这个月要处理的永远是上个月那张单。
+const billYM = () => addMonthsYM(thisYM(), -1);
+const acYM = () => UI.acYM || billYM();
 
 function toast(msg, kind = '') {
   const el = $('#toast');
@@ -407,7 +412,9 @@ function render() {
 
 function viewDashboard() {
   const mp = monthProgress();
-  const ac = airconStats();
+  // 空调费次月收，所以现在该处理的是上个月那张电费单
+  const ac = airconStats(billYM());
+  const thisMonthLabel = ymLabel(thisYM()).replace(/^\d+年/, '');
   const pct = mp.due > 0 ? Math.round(mp.got / mp.due * 100) : 0;
 
   // 空房 / 待入住
@@ -452,14 +459,14 @@ function viewDashboard() {
   </div>
 
   ${ac.missing > 0 ? `<div class="card" style="border-color:var(--warn)">
-    <h2>⏰ 本月空调费还没记录 <span class="sub">每月 1 号</span></h2>
+    <h2>⏰ ${ymLabel(billYM())}电费还没记录 <span class="sub">${thisMonthLabel}收</span></h2>
     <p style="margin:0 0 12px;font-size:14px;color:var(--text-2)">
       还有 <b>${ac.missing}</b> 个租客没填金额。看完电单去「收租」页逐个填，再打勾收款。
     </p>
-    <button class="primary" data-tab="collect">去填空调费</button>
+    <button class="primary" data-tab="collect">去填电费</button>
   </div>` : (ac.outstanding > 0 ? `<div class="card">
-    <h2>空调费 <span class="sub">${ac.paidCount} / ${ac.total} 已收</span></h2>
-    <div class="hero-sub">本月合计 ${rm(ac.billed)}，已收 ${rm(ac.collected)}，
+    <h2>${ymLabel(billYM())}电费 <span class="sub">${ac.paidCount} / ${ac.total} 已收</span></h2>
+    <div class="hero-sub">合计 ${rm(ac.billed)}，已收 ${rm(ac.collected)}，
       还差 <b style="color:var(--bad)">${rm(ac.outstanding)}</b>。</div>
   </div>` : '')}
 
@@ -691,11 +698,12 @@ function viewCollect() {
   ${rentGroups || '<div class="card"><div class="empty">本月没有需要收租的房间。</div></div>'}
 
   <div class="card">
-    <h2>空调费 <span class="sub">${ac.paidCount} / ${ac.total} 已收</span></h2>
+    <h2>${ymLabel(aym)} 电费
+      <span class="sub">${ymLabel(addMonthsYM(aym, 1)).replace(/^\d+年/, '')}收 · ${ac.paidCount} / ${ac.total} 已收</span></h2>
     <div class="yearnav">
       <button type="button" data-acym="-1">← 上个月</button>
-      <span class="num" style="font-weight:600">${ymLabel(aym)}</span>
-      <button type="button" data-acym="1" ${aym >= thisYM() ? 'disabled' : ''}>下个月 →</button>
+      <span class="num" style="font-weight:600">${ymLabel(aym)} 的电</span>
+      <button type="button" data-acym="1" ${aym >= billYM() ? 'disabled' : ''}>下个月 →</button>
     </div>
     ${ac.missing > 0
       ? `<div class="banner warn" style="margin:0 0 12px">还有 <b>${ac.missing}</b> 个租客的空调费没填金额。看完电单逐个填，再打勾收款。</div>`
@@ -1195,7 +1203,7 @@ function viewMoney() {
   </div>
 
   <div class="card">
-    <h2>空调费历史 <span class="sub">过去 12 个月</span></h2>
+    <h2>电费历史 <span class="sub">按电费所属月份</span></h2>
     ${acHist.some(h => h.billed > 0) ? acHist.map(h => {
       const open = UI.openAcMonth === h.ym;
       const owed = h.billed - h.collected;
@@ -1210,7 +1218,9 @@ function viewMoney() {
       深色 = 已收，橙色 = 已录入但还没收。合计已收
       <b>${rm(acHist.reduce((s, h) => s + h.collected, 0))}</b>，还差
       <b style="color:var(--warn)">${rm(acHist.reduce((s, h) => s + (h.billed - h.collected), 0))}</b>。
-      点任一个月看是哪几间。空调费按实际电费单收，所以不做未来推算。
+      点任一个月看是哪几间。<b>月份指的是哪个月的电，次月才收</b> ——
+      8 月那格是 8 月的电费、9 月收的。跟上面按收租月份排的租金图不是一回事。
+      电费按实际账单收，所以不做未来推算。
     </div>` : ''}
   </div>`;
 }
@@ -1419,7 +1429,7 @@ document.addEventListener('click', async ev => {
 
   if (d.acym) {
     const next = addMonthsYM(acYM(), Number(d.acym));
-    if (next > thisYM()) return;   // 电费单还没出，录不了未来
+    if (next > billYM()) return;   // 账单还没出，录不了
     UI.acYM = next;
     UI.keepScroll = true;
     render();

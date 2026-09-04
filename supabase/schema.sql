@@ -122,10 +122,14 @@ create table if not exists public.payments (
   unique (tenancy_id, ym)
 );
 
--- ---------------------------------------------------------------- 空调费
--- 每月 1 号看完电单，逐个租客填金额，再各自打勾收款。
+-- ---------------------------------------------------------------- 空调费（电费）
+-- 每月看完电单，逐个租客填金额，再各自打勾收款。
 -- 金额每月不同（按实际电费），所以不能存在租约上，必须一个月一行。
--- 跟租金分开记：可以出现「租金收了，空调费还欠着」。
+-- 跟租金分开记：可以出现「租金收了，电费还欠着」。
+--
+-- ⚠️ ym 一律指「电费所属月份」，也就是用电的那个月，不是收款的月份。
+--    电费次月收：ym='2026-08' 的那批是 8 月的电，9 月才收。
+--    钱什么时候到手看 paid_on，两者分开，不要混为一谈。
 create table if not exists public.aircon_charges (
   id          uuid primary key default gen_random_uuid(),
   owner_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
