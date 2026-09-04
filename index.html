@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>出租房管理</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#1F6F5C">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏠</text></svg>">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- 未登录 -->
+<div id="login" class="hide">
+  <h1>出租房管理</h1>
+  <p>输入邮箱，我们寄一条登录链接给你，点一下就进去，不用密码。</p>
+  <form id="login-form" class="form">
+    <div class="field wide">
+      <label for="login-email">邮箱</label>
+      <input type="email" id="login-email" required autocomplete="email" placeholder="you@example.com">
+    </div>
+    <div class="actions wide">
+      <button type="submit" class="primary">寄登录链接</button>
+    </div>
+  </form>
+  <div id="login-sent" class="banner warn hide">
+    信寄出去了，去邮箱点链接就能登录。链接有时效，过期了再寄一次即可。
+  </div>
+</div>
+
+<!-- 已登录 -->
+<div id="app" class="hide">
+  <header id="topbar">
+    <span class="title">出租房管理</span>
+    <span class="who"><span></span><button id="logout" class="linkish" style="font-size:12px">登出</button></span>
+  </header>
+
+  <nav id="tabs">
+    <button data-tab="dash"    aria-selected="true">总览</button>
+    <button data-tab="collect" aria-selected="false">收租</button>
+    <button data-tab="rooms"   aria-selected="false">房间</button>
+    <button data-tab="stays"   aria-selected="false">日租</button>
+    <button data-tab="money"   aria-selected="false">账户</button>
+  </nav>
+
+  <main id="main"></main>
+</div>
+
+<div id="toast" class="hide"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

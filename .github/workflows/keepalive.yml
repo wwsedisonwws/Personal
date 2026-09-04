@@ -1,0 +1,32 @@
+# Supabase 免费版闲置 7 天会自动暂停项目。
+# 收租是月度动作，等于每次打开都撞上暂停状态，要手动去后台唤醒。
+# 这个任务每周 ping 一次 REST 端点，让项目一直醒着。
+name: keepalive
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'   # 每周一 03:17 UTC（马来西亚 11:17）
+  workflow_dispatch:        # 也可以在 Actions 页面手动触发
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "还没设 SUPABASE_URL secret，跳过。设置方法见 README。"
+            exit 0
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            "$SUPABASE_URL/rest/v1/")
+          echo "HTTP $code"
+          # 401 也算活着 —— 说明服务在跑，只是没带够凭证。
+          case "$code" in
+            200|401) echo "项目醒着 ✅" ;;
+            *) echo "异常，可能已暂停，去后台看看"; exit 1 ;;
+          esac

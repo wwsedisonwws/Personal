@@ -1,0 +1,5 @@
+# 房客姓名、电话属于第三方个人资料，绝不能进公开仓库。
+# git 历史清不干净，一旦推上去就是永久公开。
+supabase/seed.sql
+*.local.js
+.DS_Store
