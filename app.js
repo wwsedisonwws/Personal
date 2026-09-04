@@ -228,6 +228,13 @@ function roomRent(room) {
   return num(past?.monthly_rent) || num(room.reference_rent);
 }
 
+// 这间房在这个月之后还有没有租客要来。
+// 比的是月初而不是月末 —— Hansen 10/15 入住，十月前半空着同样算「后面有人」，
+// 拿月末去比会把这种月内到来的漏掉。
+const nextTenancyAfter = (roomId, ym) => DB.tenancies
+  .filter(t => t.room_id === roomId && LIVE(t) && t.contract_start > `${ym}-01`)
+  .sort((a, b) => a.contract_start.localeCompare(b.contract_start))[0];
+
 // 某个月每间房的状态：谁在住、哪间空、空几天
 function monthBreakdown(ym) {
   const let_ = [], vacant = [], self = [];
@@ -245,7 +252,12 @@ function monthBreakdown(ym) {
         });
       }
       if (v && !occupants.length) {
-        vacant.push({ where, room, ...v, money: roomRent(room) * v.vacant / v.total });
+        // 后面有没有人已经定了 —— 有的话这个月只能短租，不能签长约
+        vacant.push({
+          where, room, ...v,
+          next: nextTenancyAfter(room.id, ym),
+          money: roomRent(room) * v.vacant / v.total,
+        });
       }
     }
   }
@@ -259,16 +271,11 @@ function vacancyCalendar(months = 12) {
   const out = [];
   for (let i = 0; i < months; i++) {
     const ym = addMonthsYM(thisYM(), i);
-    const mEnd = `${ym}-${pad2(daysInMonth(ym))}`;
     for (const room of DB.rooms) {
       const v = vacancyOf(room, ym);
       if (!v) continue;
       // 后面还有没有租客要来？有就是空档，没有就是到期未续。
-      // 比的是月初而不是月末 —— Hansen 10/15 入住，十月前半空着同样是空档，
-      // 拿月末去比会把这种月内到来的漏掉。
-      const next = DB.tenancies
-        .filter(t => t.room_id === room.id && LIVE(t) && t.contract_start > `${ym}-01`)
-        .sort((a, b) => a.contract_start.localeCompare(b.contract_start))[0];
+      const next = nextTenancyAfter(room.id, ym);
       out.push({
         ym, room, ...v, gap: !!next, next,
         money: roomRent(room) * v.vacant / v.total,
@@ -1187,7 +1194,10 @@ function monthDetailHTML(ym) {
 
     ${vacant.length ? `<h4 style="color:var(--bad)">空置 · ${vacant.length} 间 · 少收约 ${rm(lost)}</h4>
     <ul>${vacant.map(x => `<li>
-      <span>${esc(x.where)} <span class="muted">空 ${x.vacant === x.total ? '整月' : x.vacant + ' 天'}</span></span>
+      <span>${esc(x.where)} <span class="muted">空 ${x.vacant === x.total ? '整月' : x.vacant + ' 天'}</span><br>${
+        x.next
+          ? `<span class="pill warn">${x.next.contract_start} ${esc(x.next.tenant_name)} 已定 · 只能短租</span>`
+          : '<span class="tag">可长租</span>'}</span>
       <b style="color:var(--bad)">${rm(x.money)}</b></li>`).join('')}</ul>` : ''}
 
     ${self.length ? `<h4>自住 · ${self.length} 间</h4>
