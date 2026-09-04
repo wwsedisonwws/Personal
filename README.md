@@ -28,6 +28,11 @@ Bayan + Perling 两处房产、11 间房的租务管理网站。
   条目按催收 / 要办 / 可优化**各自限额**，不是取总数前 N 条 ——
   否则催收一多，「空档能做日租」这种真能多赚钱的建议就永远排不进来。
 
+- **提醒的规则是第二份实现，必须跟网页那份对得上**。Edge Function 跑在 Deno 上，
+  用不了 `app.js`，所以 `supabase/functions/agenda/rules.ts` 重写了一份。
+  为压低漂移风险：函数里只放提醒真正要用的最窄一组规则（入住退房、收租日、
+  电费月份、到期招租），空档/汇率/押金覆盖一概不搬；且测试会把两边的事件
+  **逐条双向比对**，对不上就算失败。改规则时两处都要改。
 - **接待日程按日子排，同一天的并在一起**。其他卡都是按房间或按月组织的，
   合约到期卡只说「还有 51 天」，不会告诉你那天还有别人同时退房。
   10/31 三人同退、一次要备 RM12,000 押金，只有按日子排才看得出来。
@@ -123,6 +128,40 @@ Supabase 免费版**闲置 7 天会暂停项目**。收租是月度动作，中�
 想确认它能跑：仓库 **Actions** → 左边选 **keepalive** → **Run workflow** 手动触发一次，
 绿勾就是正常。
 
+### 8. 提醒：iPhone 日历 + 每日邮件（可选）
+
+`supabase/functions/agenda/` 是一个 Edge Function，两个入口共用同一套规则：
+
+| 入口 | 谁来调 | 作用 |
+|---|---|---|
+| `?mode=ics&token=…` | iPhone 日历（订阅后自动拉） | 入住/退房/日租进出变成日历事件，提前一天响 |
+| `?mode=notify&token=…` | GitHub Actions 每天一次 | **有事才**发邮件；没事返回 204 不发信 |
+
+> **为什么不把 .ics 直接放 GitHub Pages**：Pages 上的文件是公开的，
+> 日历里带房客姓名等于公开。所以必须由带 token 的接口来发，token 不进仓库。
+
+设置步骤：
+
+1. **注册 [resend.com](https://resend.com)**（免费）。寄给自己 Gmail 用
+   `onboarding@resend.dev` 当寄件人即可，不必验证域名。拿到 API key。
+2. Supabase 后台 → **Edge Functions** → 新建函数 `agenda`，
+   把 `index.ts` 和 `rules.ts` 两个文件的内容贴进去 → Deploy。
+3. **关掉这个函数的 Verify JWT** —— iPhone 日历发不了 Authorization 头，
+   鉴权改由 URL 里的 token 负责。**不关的话日历订阅会一直失败。**
+4. Edge Functions → **Secrets** 加三个：
+   `FEED_TOKEN`（自己定一串随机字符）、`RESEND_API_KEY`、`NOTIFY_TO`（收件邮箱）。
+   `SUPABASE_URL` 和 `SUPABASE_SERVICE_ROLE_KEY` 平台自动注入，不用自己加。
+5. GitHub 仓库 → Settings → Secrets → Actions 加两个：
+   `SUPABASE_FN_URL`（`https://<项目>.supabase.co/functions/v1/agenda`）、
+   `FEED_TOKEN`（跟第 4 步同一个值）。
+6. **iPhone 订阅日历**：设置 → 日历 → 帐户 → 添加帐户 → 其他 →
+   **添加已订阅的日历** → 贴 `https://<项目>.supabase.co/functions/v1/agenda?mode=ics&token=<你的token>`
+
+先在浏览器打开 `?mode=notify&token=…` 试一次，该收到邮件（或看到 `204`，表示今天没事）。
+
+**日历那条网址等于钥匙**，别转发给别人 —— 谁拿到都能看你的租客名单。
+真的外泄了就换 `FEED_TOKEN`（Supabase 和 GitHub 两边都要改），旧网址立即失效。
+
 ## 怎么确认外人真的看不到
 
 网站是公开的、anon key 也在源码里，所以**一定要亲自验证 RLS 生效**。两个测试：
@@ -157,5 +196,7 @@ styles.css                      样式（手机优先）
 config.js                       Supabase 连接（公开值）
 supabase/schema.sql             建表 + RLS，可重复跑（改过表结构后要重跑一次）
 supabase/seed.sql               初始数据（gitignore，不进仓库）
+supabase/functions/agenda/      提醒用的 Edge Function（ICS 日历 + 邮件摘要）
 .github/workflows/keepalive.yml 每周保活
+.github/workflows/notify.yml    每天叫一次 agenda 发提醒
 ```

@@ -1,0 +1,38 @@
+# 每天叫一次 Supabase 的 agenda 函数，有事才发邮件（没事它返回 204，不发信）。
+#
+# 为什么不用 Supabase 自己的 pg_cron：Actions 的日志看得见、失败有红叉，
+# 排查起来比在数据库里翻 cron 记录容易得多。
+#
+# 需要两个仓库 Secret（Settings → Secrets and variables → Actions）：
+#   SUPABASE_FN_URL   https://<项目>.supabase.co/functions/v1/agenda
+#   FEED_TOKEN        跟 Supabase 那边 Edge Function Secrets 里的同一个值
+# 仓库虽然公开，Secrets 只有你自己看得到，也不会出现在日志里。
+name: notify
+
+on:
+  schedule:
+    - cron: '0 0 * * *'      # 每天 00:00 UTC = 马来西亚早上 8 点
+  workflow_dispatch:          # 也可在 Actions 页面手动跑一次试试
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 发今天的提醒
+        env:
+          FN: ${{ secrets.SUPABASE_FN_URL }}
+          TOKEN: ${{ secrets.FEED_TOKEN }}
+        run: |
+          if [ -z "$FN" ] || [ -z "$TOKEN" ]; then
+            echo "还没设 SUPABASE_FN_URL / FEED_TOKEN，跳过。设置方法见 README。"
+            exit 0
+          fi
+          # -o 丢掉响应体：里面可能有房客姓名，不该留在 Actions 日志里
+          code=$(curl -s -o /tmp/out -w '%{http_code}' --max-time 30 \
+            "$FN?mode=notify&token=$TOKEN")
+          case "$code" in
+            200) echo "✅ 有事，邮件已发出" ;;
+            204) echo "✅ 今天没事，没发信" ;;
+            404) echo "❌ token 不对，或函数没部署"; exit 1 ;;
+            *)   echo "❌ HTTP $code"; head -c 300 /tmp/out; exit 1 ;;
+          esac
