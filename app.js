@@ -138,7 +138,13 @@ const paidAmount = (t, ym) => {
 
 // 这份租约某个月的实际收租日。有人 1 号交，有人 19 号、25 号。
 const dueDay = t => Math.min(Math.max(num(t.rent_due_day) || 1, 1), 28);
-const dueDateOf = (t, ym) => `${ym}-${pad2(dueDay(t))}`;
+// 首月按入住日算，之后才按固定收租日。
+// 否则会出现「收租日早于入住日」——WeiQing 7/20 入住却是 19 号收租，
+// 那 7 月的应收日会落在他搬进来之前。
+const dueDateOf = (t, ym) => {
+  const d = `${ym}-${pad2(dueDay(t))}`;
+  return ym === t.contract_start.slice(0, 7) && d < t.contract_start ? t.contract_start : d;
+};
 // 是否已经过了收租日。没到日子就不算欠 —— 25 号才交租的人，4 号催他是冤枉的。
 const isPastDue = (t, ym) => todayISO() >= dueDateOf(t, ym);
 
