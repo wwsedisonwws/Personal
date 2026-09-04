@@ -51,7 +51,13 @@ const DB = {
   accounts: [], stays: [], aircon: [], settings: null,
 };
 
-const UI = { tab: 'dash', roomId: null, year: thisYear(), openMonth: null };
+const UI = {
+  tab: 'dash', roomId: null, year: thisYear(),
+  openMonth: null,      // 租金推算图展开的月份
+  openAcMonth: null,    // 空调费历史展开的月份（跟上面分开，否则两张图会互相收起）
+  acYM: null,           // 收租页正在录入的空调费月份，null = 当月
+};
+const acYM = () => UI.acYM || thisYM();
 
 function toast(msg, kind = '') {
   const el = $('#toast');
@@ -613,7 +619,6 @@ function viewDashboard() {
 function viewCollect() {
   const ym = thisYM();
   const mp = monthProgress(ym);
-  const ac = airconStats(ym);
 
   const rentGroups = DB.properties.map(p => {
     const rows = roomsOf(p.id).map(room => {
@@ -643,13 +648,16 @@ function viewCollect() {
     return rows ? `<div class="card"><h2>${esc(p.name)}</h2>${rows}</div>` : '';
   }).join('');
 
-  // 空调费：每月 1 号看完电单逐个填金额，再各自打勾
-  const prevYM = addMonthsYM(ym, -1);
+  // 空调费：每月 1 号看完电单逐个填金额，再各自打勾。
+  // 月份可以往回切 —— 上个月忘了录得补得回来，这是最常见的情况。
+  const aym = acYM();
+  const ac = airconStats(aym);
+  const prevYM = addMonthsYM(aym, -1);
   const airRows = DB.properties.map(p => {
     const rows = roomsOf(p.id).map(room => {
       const t = activeTenancy(room.id);
-      if (!t || !isDue(t, ym)) return '';
-      const a = airconOf(t.id, ym);
+      if (!t || !isDue(t, aym)) return '';
+      const a = airconOf(t.id, aym);
       const prev = airconOf(t.id, prevYM);
       const hint = prev ? `上月 ${rm(prev.amount)}` : '<span class="muted">上月无记录</span>';
       return `<form class="collect-row aircon-row" data-tenancy="${t.id}">
@@ -683,13 +691,18 @@ function viewCollect() {
   ${rentGroups || '<div class="card"><div class="empty">本月没有需要收租的房间。</div></div>'}
 
   <div class="card">
-    <h2>${ymLabel(ym)} 空调费 <span class="sub">${ac.paidCount} / ${ac.total} 已收</span></h2>
+    <h2>空调费 <span class="sub">${ac.paidCount} / ${ac.total} 已收</span></h2>
+    <div class="yearnav">
+      <button type="button" data-acym="-1">← 上个月</button>
+      <span class="num" style="font-weight:600">${ymLabel(aym)}</span>
+      <button type="button" data-acym="1" ${aym >= thisYM() ? 'disabled' : ''}>下个月 →</button>
+    </div>
     ${ac.missing > 0
       ? `<div class="banner warn" style="margin:0 0 12px">还有 <b>${ac.missing}</b> 个租客的空调费没填金额。看完电单逐个填，再打勾收款。</div>`
       : `<div class="banner warn" style="margin:0 0 12px;background:var(--good-soft);color:var(--good)">
-           本月电费已全部录入，合计 <b>${rm(ac.billed)}</b>，已收 <b>${rm(ac.collected)}</b>${
+           这个月电费已全部录入，合计 <b>${rm(ac.billed)}</b>，已收 <b>${rm(ac.collected)}</b>${
              ac.outstanding > 0 ? `，还差 <b>${rm(ac.outstanding)}</b>` : ''}。</div>`}
-    ${airRows || '<div class="empty">本月没有在住租客。</div>'}
+    ${airRows || '<div class="empty">这个月没有在住租客。</div>'}
     <div class="hint muted" style="margin-top:12px;font-size:12px">
       金额每月按实际电费填，跟租金分开打勾 —— 可以出现「租金收了、空调费还欠着」。
     </div>
@@ -1080,6 +1093,8 @@ function viewMoney() {
   const maxF = Math.max(...future.map(f => f.total), 1);
   const past = pastIncome(6);
   const maxP = Math.max(...past.map(p => p.rent + p.stay), 1);
+  const acHist = airconHistory(12);
+  const maxAc = Math.max(...acHist.map(h => h.billed), 1);
 
   return `
   <div class="card">
@@ -1177,6 +1192,82 @@ function viewMoney() {
       <span class="amt">${rm(p.rent + p.stay)}</span>
     </div>`).join('')}
     <div class="hero-sub" style="margin-top:10px">只统计已经打勾的收租记录。</div>
+  </div>
+
+  <div class="card">
+    <h2>空调费历史 <span class="sub">过去 12 个月</span></h2>
+    ${acHist.some(h => h.billed > 0) ? acHist.map(h => {
+      const open = UI.openAcMonth === h.ym;
+      const owed = h.billed - h.collected;
+      return `<button class="fbar" data-acmonth="${h.ym}" aria-expanded="${open}">
+        <span class="mo-label">${h.ym.slice(2)}</span>
+        <span class="track"><i style="width:${Math.round(h.collected / maxAc * 100)}%"></i>
+          ${owed > 0 ? `<i class="dip" style="width:${Math.round(owed / maxAc * 100)}%"></i>` : ''}</span>
+        <span class="amt" ${owed > 0 ? 'style="color:var(--warn)"' : ''}>${rm(h.billed)}</span>
+      </button>${open ? airconDetailHTML(h.ym) : ''}`;
+    }).join('') : '<div class="empty">还没有空调费记录。去「收租」页逐个填金额。</div>'}
+    ${acHist.some(h => h.billed > 0) ? `<div class="hero-sub" style="margin-top:10px">
+      深色 = 已收，橙色 = 已录入但还没收。合计已收
+      <b>${rm(acHist.reduce((s, h) => s + h.collected, 0))}</b>，还差
+      <b style="color:var(--warn)">${rm(acHist.reduce((s, h) => s + (h.billed - h.collected), 0))}</b>。
+      点任一个月看是哪几间。空调费按实际电费单收，所以不做未来推算。
+    </div>` : ''}
+  </div>`;
+}
+
+// 空调费历史：直接按已录的记录统计。
+// 不能走 airconStats —— 那个只算在住/预订的租约，房客一搬走（status 变 ended），
+// 他过去交过的钱就会从历史里凭空消失。历史要照实记账，跟人现在还在不在无关。
+function airconHistory(months = 12) {
+  const out = [];
+  for (let i = months - 1; i >= 0; i--) {
+    const ym = addMonthsYM(thisYM(), -i);
+    const rows = DB.aircon.filter(a => a.ym === ym);
+    out.push({
+      ym,
+      count: rows.length,
+      billed: rows.reduce((s, a) => s + num(a.amount), 0),
+      collected: rows.filter(a => a.paid).reduce((s, a) => s + num(a.amount), 0),
+    });
+  }
+  return out;
+}
+
+// 某月空调费的逐间明细。
+// 以已录的记录为准（含已搬走的房客），再补上「当月在住但没录金额」的那些。
+function airconDetailHTML(ym) {
+  const seen = new Set();
+  const rowOf = (t, a) => {
+    const room = DB.rooms.find(r => r.id === t?.room_id);
+    const p = t ? propertyOf(t.room_id) : null;
+    return {
+      where: `${p?.name || ''} · ${room?.name || '（房间已删除）'}`,
+      name: t?.tenant_name || '（租约已删除）',
+      ended: t?.status === 'ended',
+      a,
+    };
+  };
+  const rows = DB.aircon.filter(a => a.ym === ym).map(a => {
+    seen.add(a.tenancy_id);
+    return rowOf(DB.tenancies.find(t => t.id === a.tenancy_id), a);
+  });
+  for (const t of airconTenancies(ym)) {
+    if (!seen.has(t.id)) rows.push(rowOf(t, null));
+  }
+  if (!rows.length) return '<div class="mdetail"><div class="empty">这个月没有在住租客。</div></div>';
+  const done = rows.filter(r => r.a && r.a.paid);
+  const unpaid = rows.filter(r => r.a && !r.a.paid);
+  const missing = rows.filter(r => !r.a);
+  const line = r => `<li><span>${esc(r.where)} <span class="muted">${esc(r.name)}</span>${
+    r.ended ? ' <span class="tag">已搬走</span>' : ''}</span>
+    <b>${r.a ? rm(r.a.amount) : '—'}</b></li>`;
+  return `<div class="mdetail">
+    ${done.length ? `<h4>已收 · ${done.length} 间 · ${rm(done.reduce((s, r) => s + num(r.a.amount), 0))}</h4>
+      <ul>${done.map(line).join('')}</ul>` : ''}
+    ${unpaid.length ? `<h4 style="color:var(--bad)">未收 · ${unpaid.length} 间 · ${rm(unpaid.reduce((s, r) => s + num(r.a.amount), 0))}</h4>
+      <ul>${unpaid.map(line).join('')}</ul>` : ''}
+    ${missing.length ? `<h4 class="muted">没录金额 · ${missing.length} 间</h4>
+      <ul>${missing.map(line).join('')}</ul>` : ''}
   </div>`;
 }
 
@@ -1221,13 +1312,19 @@ function armDanger(btn, onConfirm) {
 }
 
 document.addEventListener('click', async ev => {
-  const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay],[data-airtick],[data-promote],[data-cancelbook],[data-delacct],[data-fmonth]');
+  const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay],[data-airtick],[data-promote],[data-cancelbook],[data-delacct],[data-fmonth],[data-acmonth],[data-acym]');
   if (!el) return;
   const d = el.dataset;
 
   if (d.fmonth) {
     UI.openMonth = UI.openMonth === d.fmonth ? null : d.fmonth;
     UI.keepScroll = true;   // 展开明细后别把页面弹回顶部
+    render();
+    return;
+  }
+  if (d.acmonth) {
+    UI.openAcMonth = UI.openAcMonth === d.acmonth ? null : d.acmonth;
+    UI.keepScroll = true;
     render();
     return;
   }
@@ -1320,8 +1417,17 @@ document.addEventListener('click', async ev => {
     return;
   }
 
+  if (d.acym) {
+    const next = addMonthsYM(acYM(), Number(d.acym));
+    if (next > thisYM()) return;   // 电费单还没出，录不了未来
+    UI.acYM = next;
+    UI.keepScroll = true;
+    render();
+    return;
+  }
+
   if (d.airtick) {
-    const a = airconOf(d.airtick, thisYM());
+    const a = airconOf(d.airtick, acYM());
     if (!a) { toast('先填金额再打勾'); return; }
     await write(() => sb.from('aircon_charges')
       .update({ paid: !a.paid, paid_on: a.paid ? null : todayISO() }).eq('id', a.id));
@@ -1431,14 +1537,14 @@ document.addEventListener('submit', async ev => {
   if (f.classList.contains('aircon-row')) {
     const raw = $('input', f).value.trim();
     const tid = f.dataset.tenancy;
-    const existing = airconOf(tid, thisYM());
+    const existing = airconOf(tid, acYM());
     if (raw === '') {
       if (existing) await write(() => sb.from('aircon_charges').delete().eq('id', existing.id), '已清除');
       return;
     }
     await write(() => sb.from('aircon_charges').upsert(
-      { tenancy_id: tid, ym: thisYM(), amount: Number(raw) || 0 },
-      { onConflict: 'tenancy_id,ym' }), '空调费已存');
+      { tenancy_id: tid, ym: acYM(), amount: Number(raw) || 0 },
+      { onConflict: 'tenancy_id,ym' }), `${ymLabel(acYM())} 空调费已存`);
     return;
   }
 

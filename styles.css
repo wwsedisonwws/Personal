@@ -280,7 +280,11 @@ button.fbar:hover { background: var(--surface-2); }
 button.fbar[aria-expanded="true"] { background: var(--accent-soft); }
 .fbar { display: flex; align-items: center; gap: 10px; padding: 7px 0; font-size: 13px; }
 .fbar .mo-label { width: 62px; flex: 0 0 auto; color: var(--text-2); }
-.fbar .track { flex: 1 1 auto; height: 18px; background: var(--surface-2); border-radius: 5px; overflow: hidden; }
-.fbar .track > i { display: block; height: 100%; background: var(--accent); }
+/* flex 是为了空调费那张图 —— 一条轨道里要并排放「已收」和「未收」两段 */
+.fbar .track {
+  flex: 1 1 auto; height: 18px; min-width: 0;
+  display: flex; background: var(--surface-2); border-radius: 5px; overflow: hidden;
+}
+.fbar .track > i { height: 100%; background: var(--accent); flex: 0 0 auto; }
 .fbar .track > i.dip { background: var(--warn); }
 .fbar .amt { width: 74px; flex: 0 0 auto; text-align: right; font-family: var(--font-num); font-weight: 600; }
