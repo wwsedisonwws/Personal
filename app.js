@@ -25,6 +25,10 @@ const cny = n => '¥' + Math.round(num(n)).toLocaleString('en-US');
 // 日期只做字符串比较，避开时区陷阱
 const daysBetween = (a, b) => Math.round((Date.parse(b + 'T00:00:00') - Date.parse(a + 'T00:00:00')) / 86400000);
 const daysUntil = iso => iso ? daysBetween(todayISO(), iso) : Infinity;
+function addDaysISO(iso, n) {
+  const d = new Date(Date.parse(iso + 'T00:00:00') + n * 86400000);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
 
 function addMonthsYM(ym, k) {
   const [y, m] = ym.split('-').map(Number);
@@ -433,6 +437,98 @@ function render() {
 
 /* ---------------------------------------------------------------- 总览 */
 
+/* ---------------------------------------------------------------- 接待日程
+   所有日期库里都有，但从来没按日子排过 —— 合约到期卡只说「还有 51 天」，
+   不会告诉你那天还有别人同时退房。约人看房、签合同、退押金要的是日程，不是清单。 */
+const WEEKDAY = ['日', '一', '二', '三', '四', '五', '六'];
+const weekdayOf = iso => '周' + WEEKDAY[new Date(iso + 'T00:00:00').getDay()];
+
+function schedule(days = 90) {
+  const until = addDaysISO(todayISO(), days);
+  const ev = [];
+  const where = roomId => {
+    const room = DB.rooms.find(r => r.id === roomId);
+    const p = propertyOf(roomId);
+    return `${p?.name || ''} · ${room?.name || '（已删除）'}`;
+  };
+
+  for (const t of DB.tenancies.filter(LIVE)) {
+    if (t.contract_start >= todayISO() && t.contract_start <= until) {
+      const firstYM = t.contract_start.slice(0, 7);
+      const paid = !!paymentOf(t.id, firstYM);
+      ev.push({ date: t.contract_start, kind: '入住', who: t.tenant_name, where: where(t.room_id),
+        todo: `签合同、交钥匙 · 押金 ${rm(t.deposit)}` +
+              (paid ? ' · 首月租金已收' : ` · 首月租金 ${rm(rentFor(t, firstYM))} 待收`),
+        room: t.room_id });
+    }
+    if (t.contract_end >= todayISO() && t.contract_end <= until) {
+      // 关键是「他走后第二天这间房有没有人」，不是「有没有人在他之后开始」。
+      // 不能用 nextTenancyAfter（那是按月的，给空档算用）：zhengyu 住到 10-31，
+      // 而 Hansen 10-15 就住进同一间了 —— 房间早有人接，根本不用招租。
+      const after = addDaysISO(t.contract_end, 1);
+      const others = DB.tenancies.filter(x =>
+        x.room_id === t.room_id && LIVE(x) && x.id !== t.id);
+      const covering = others.find(x => x.contract_start <= after && x.contract_end >= after);
+      const upcoming = others.filter(x => x.contract_start > after)
+        .sort((a, b) => a.contract_start.localeCompare(b.contract_start))[0];
+      const succ = covering ? ` · 房间由 ${esc(covering.tenant_name)} 接着住`
+        : upcoming ? ` · 下一位 ${esc(upcoming.tenant_name)} ${upcoming.contract_start} 才来`
+        : ' · 后面没人接，要招租';
+      ev.push({ date: t.contract_end, kind: '退房', who: t.tenant_name, where: where(t.room_id),
+        todo: `验房、退押金 ${rm(t.deposit)}` + succ,
+        money: num(t.deposit), room: t.room_id });
+    }
+  }
+
+  for (const s of DB.stays) {
+    const n = stayNights(s);
+    if (s.check_in >= todayISO() && s.check_in <= until) {
+      ev.push({ date: s.check_in, kind: '日租入住', who: s.guest_name || '（未填姓名）', where: where(s.room_id),
+        todo: `${n} 晚 · ${rm(stayAmount(s))}` + (s.paid ? ' 已收' : ' 待收'), room: s.room_id });
+    }
+    if (s.check_out >= todayISO() && s.check_out <= until) {
+      ev.push({ date: s.check_out, kind: '日租退房', who: s.guest_name || '（未填姓名）', where: where(s.room_id),
+        todo: '收钥匙、验房', room: s.room_id });
+    }
+  }
+
+  // 按日期分组 —— 同一天有好几件事正是最该看见的（9/9 两拨人、10/31 三人同退）
+  const byDate = {};
+  for (const e of ev.sort((a, b) => a.date.localeCompare(b.date))) (byDate[e.date] ||= []).push(e);
+  return Object.entries(byDate).map(([date, items]) => ({
+    date, items, days: daysUntil(date),
+    deposit: items.reduce((s, x) => s + (x.kind === '退房' ? x.money : 0), 0),
+  }));
+}
+
+function scheduleHTML() {
+  const groups = schedule(90);
+  if (!groups.length) {
+    return `<div class="card"><h2>接待日程</h2>
+      <div class="empty">未来 90 天没有要接待的人。</div></div>`;
+  }
+  const tone = { '入住': 'good', '退房': 'warn', '日租入住': 'flat', '日租退房': 'flat' };
+  return `<div class="card">
+    <h2>接待日程 <span class="sub">未来 90 天</span></h2>
+    ${groups.map(g => `
+      <div class="collect-row" style="display:block">
+        <div class="who" style="${g.days <= 14 ? 'color:var(--accent)' : ''}">
+          ${g.date.slice(5)} ${weekdayOf(g.date)}
+          <span class="muted" style="font-weight:400">· ${
+            g.days === 0 ? '就是今天' : `还有 ${g.days} 天`}</span>
+          ${g.items.length > 1 ? `<span class="tag">${g.items.length} 件事</span>` : ''}
+        </div>
+        ${g.items.map(it => `<div class="sub" style="margin-top:6px">
+          <span class="pill ${tone[it.kind]}">${it.kind}</span>
+          <b>${esc(it.who)}</b> · ${esc(it.where)}<br>${it.todo}
+          <button class="linkish" data-room="${it.room}" style="font-size:12.5px">看这间</button>
+        </div>`).join('')}
+        ${g.deposit > 0 ? `<div class="sub" style="margin-top:6px;color:var(--warn)">
+          这天要退押金合计 <b>${rm(g.deposit)}</b>，提前备好钱</div>` : ''}
+      </div>`).join('')}
+  </div>`;
+}
+
 /* ---------------------------------------------------------------- 本月要做的事
    全部从现有数据推导，不做估计也不编 —— 每一条都指名道姓、带金额和日期，
    照着做就行。刻意不接 LLM：数字系统里都有，直接算是精确的，
@@ -618,6 +714,8 @@ function viewDashboard() {
   </div>
 
   ${briefingHTML()}
+
+  ${scheduleHTML()}
 
   <div class="card">
     <h2>关键数字</h2>
