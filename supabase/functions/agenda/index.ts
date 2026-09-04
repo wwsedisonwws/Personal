@@ -54,7 +54,9 @@ Deno.serve(async req => {
   try {
     db = await loadDB();
   } catch (e) {
-    return new Response(`读取数据失败：${e.message}`, { status: 500 });
+    // Deno 的 TS 是严格模式，catch 的 e 是 unknown，不能直接读 .message
+    return new Response(
+      `读取数据失败：${e instanceof Error ? e.message : String(e)}`, { status: 500 });
   }
 
   if (url.searchParams.get('mode') === 'ics') {
