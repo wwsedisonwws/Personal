@@ -51,7 +51,7 @@ const DB = {
   accounts: [], stays: [], aircon: [], settings: null,
 };
 
-const UI = { tab: 'dash', roomId: null, year: thisYear() };
+const UI = { tab: 'dash', roomId: null, year: thisYear(), openMonth: null };
 
 function toast(msg, kind = '') {
   const el = $('#toast');
@@ -228,6 +228,30 @@ function roomRent(room) {
   return num(past?.monthly_rent) || num(room.reference_rent);
 }
 
+// 某个月每间房的状态：谁在住、哪间空、空几天
+function monthBreakdown(ym) {
+  const let_ = [], vacant = [], self = [];
+  for (const prop of DB.properties) {
+    for (const room of roomsOf(prop.id)) {
+      const where = `${prop.name} · ${room.name}`;
+      if (room.self_occupied) { self.push({ where, room }); continue; }
+      const occupants = DB.tenancies.filter(t => t.room_id === room.id && LIVE(t) && isDue(t, ym));
+      const v = vacancyOf(room, ym);
+      if (occupants.length) {
+        let_.push({
+          where, room, occupants,
+          rent: occupants.reduce((s, t) => s + rentFor(t, ym), 0),
+          partial: v ? v.vacant : 0,
+        });
+      }
+      if (v && !occupants.length) {
+        vacant.push({ where, room, ...v, money: roomRent(room) * v.vacant / v.total });
+      }
+    }
+  }
+  return { let_, vacant, self };
+}
+
 // 未来 N 个月的空房。分两种，因为该采取的行动完全不同：
 //   空档   —— 后面已经有租客了，中间这段断了，是实打实在漏钱
 //   到期未续 —— 后面还没人，这是「该找租客了」，跟未来收入推算讲的是同一件事
@@ -360,8 +384,10 @@ function render() {
     dash: viewDashboard, collect: viewCollect, rooms: viewRooms,
     stays: viewStays, money: viewMoney,
   };
+  const keep = UI.keepScroll ? window.scrollY : 0;
   $('#main').innerHTML = UI.roomId ? viewRoomDetail() : views[UI.tab]();
-  window.scrollTo({ top: 0 });
+  window.scrollTo({ top: keep });
+  UI.keepScroll = false;
 }
 
 /* ---------------------------------------------------------------- 总览 */
@@ -1123,14 +1149,16 @@ function viewMoney() {
     ${future.map((f, i) => {
       const prev = i > 0 ? future[i - 1].total : f.total;
       const dip = f.total < prev;
-      return `<div class="fbar">
+      const open = UI.openMonth === f.ym;
+      return `<button class="fbar" data-fmonth="${f.ym}" aria-expanded="${open}">
         <span class="mo-label">${f.ym.slice(2)}</span>
         <span class="track"><i class="${dip ? 'dip' : ''}" style="width:${Math.round(f.total / maxF * 100)}%"></i></span>
         <span class="amt" ${dip ? 'style="color:var(--warn)"' : ''}>${rm(f.total)}</span>
-      </div>`;
+      </button>${open ? monthDetailHTML(f.ym) : ''}`;
     }).join('')}
     <div class="hero-sub" style="margin-top:10px">
-      橙色 = 比上个月少，因为有合约到期。提前找租客补上，别等空了才发现。
+      点任一个月，看那个月哪些房出租、哪些房空着。
+      橙色 = 比上个月少，因为有合约到期。
     </div>
   </div>
 
@@ -1142,6 +1170,28 @@ function viewMoney() {
       <span class="amt">${rm(p.rent + p.stay)}</span>
     </div>`).join('')}
     <div class="hero-sub" style="margin-top:10px">只统计已经打勾的收租记录。</div>
+  </div>`;
+}
+
+// 点开某个月后展开的明细：那个月哪些房出租、哪些房空着
+function monthDetailHTML(ym) {
+  const { let_, vacant, self } = monthBreakdown(ym);
+  const income = let_.reduce((s, x) => s + x.rent, 0);
+  const lost = vacant.reduce((s, x) => s + x.money, 0);
+  return `<div class="mdetail">
+    <h4>出租中 · ${let_.length} 间 · ${rm(income)}</h4>
+    ${let_.length ? `<ul>${let_.map(x => `<li>
+      <span>${esc(x.where)} <span class="muted">${x.occupants.map(t => esc(t.tenant_name)).join('、')}</span>${
+        x.partial ? ` <span class="tag">当月空 ${x.partial} 天</span>` : ''}</span>
+      <b>${rm(x.rent)}</b></li>`).join('')}</ul>` : '<div class="empty">无</div>'}
+
+    ${vacant.length ? `<h4 style="color:var(--bad)">空置 · ${vacant.length} 间 · 少收约 ${rm(lost)}</h4>
+    <ul>${vacant.map(x => `<li>
+      <span>${esc(x.where)} <span class="muted">空 ${x.vacant === x.total ? '整月' : x.vacant + ' 天'}</span></span>
+      <b style="color:var(--bad)">${rm(x.money)}</b></li>`).join('')}</ul>` : ''}
+
+    ${self.length ? `<h4>自住 · ${self.length} 间</h4>
+    <ul>${self.map(x => `<li><span>${esc(x.where)}</span></li>`).join('')}</ul>` : ''}
   </div>`;
 }
 
@@ -1161,10 +1211,16 @@ function armDanger(btn, onConfirm) {
 }
 
 document.addEventListener('click', async ev => {
-  const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay],[data-airtick],[data-promote],[data-cancelbook],[data-delacct]');
+  const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay],[data-airtick],[data-promote],[data-cancelbook],[data-delacct],[data-fmonth]');
   if (!el) return;
   const d = el.dataset;
 
+  if (d.fmonth) {
+    UI.openMonth = UI.openMonth === d.fmonth ? null : d.fmonth;
+    UI.keepScroll = true;   // 展开明细后别把页面弹回顶部
+    render();
+    return;
+  }
   if (d.tab)   { UI.tab = d.tab; UI.roomId = null; render(); return; }
   if (d.back)  { UI.roomId = null; render(); return; }
   if (d.room)  { UI.roomId = d.room; UI.tab = 'rooms'; UI.year = thisYear(); render(); return; }
