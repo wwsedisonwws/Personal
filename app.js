@@ -430,11 +430,144 @@ function render() {
 
 /* ---------------------------------------------------------------- 总览 */
 
+/* ---------------------------------------------------------------- 本月要做的事
+   全部从现有数据推导，不做估计也不编 —— 每一条都指名道姓、带金额和日期，
+   照着做就行。刻意不接 LLM：数字系统里都有，直接算是精确的，
+   而且 API key 在纯静态站点里藏不住（anon key 有 RLS 兜底，AI 的 key 没有）。 */
+function briefing() {
+  const out = [];
+  // pin=1 的排在同类最后（例如「另有 N 位欠租」这种汇总行，
+  // 金额最大但不该盖过具名的那几条）
+  const add = (level, title, detail, money, action, pin) =>
+    out.push({ level, title, detail, money: money || 0, action, pin: pin || 0 });
+  const monthOnly = ym => ymLabel(ym).replace(/^\d+年/, '');
+
+  // ---- 该催的钱 ----
+  const arrears = DB.tenancies.filter(LIVE)
+    .map(t => ({ t, ...arrearsOf(t) })).filter(x => x.amount > 0)
+    .sort((a, b) => b.amount - a.amount);
+  for (const x of arrears.slice(0, 3)) {
+    const room = DB.rooms.find(r => r.id === x.t.room_id);
+    const last = x.months[x.months.length - 1];
+    const late = daysBetween(dueDateOf(x.t, last), todayISO());
+    add('urgent', `催 ${x.t.tenant_name} 收租`,
+      `${room?.name || ''} · 欠 ${x.months.length} 个月（${ymLabel(x.months[0])} 起）` +
+      (late > 0 ? ` · 最近一笔逾期 ${late} 天` : ''),
+      x.amount, { room: x.t.room_id, label: '看这间' });
+  }
+  if (arrears.length > 3) {
+    const rest = arrears.slice(3);
+    add('urgent', `另有 ${rest.length} 位欠租`,
+      rest.map(x => esc(x.t.tenant_name)).join('、'),
+      rest.reduce((s, x) => s + x.amount, 0), null, 1);
+  }
+
+  // ---- 电费 ----
+  const ac = airconStats(billYM());
+  if (ac.missing > 0) {
+    add('todo', `录 ${ymLabel(billYM())} 的电费`,
+      `${ac.missing} 位租客还没填金额，${monthOnly(thisYM())}收`,
+      0, { tab: 'collect', label: '去填' });
+  } else if (ac.outstanding > 0) {
+    add('urgent', `收 ${ymLabel(billYM())} 电费`,
+      `${ac.total - ac.paidCount} 位还没交`,
+      ac.outstanding, { tab: 'collect', label: '去打勾' });
+  }
+
+  // ---- 合约快到期又没有下一位 ----
+  for (const room of DB.rooms) {
+    const st = roomStatus(room);
+    if (!['soon', 'urgent'].includes(st.key)) continue;
+    if (nextTenancyAfter(room.id, st.tenancy.contract_end.slice(0, 7))) continue;
+    const d = daysUntil(st.tenancy.contract_end);
+    add('todo', `${room.name} 要找下一位`,
+      `${st.tenancy.tenant_name} ${st.tenancy.contract_end} 到期（还有 ${d} 天），后面没人接`,
+      num(st.tenancy.monthly_rent), { room: room.id, label: '看这间' });
+  }
+
+  // ---- 空档拿来做日租 ----
+  const vac = vacancyCalendar(12);
+  for (const g of vac.filter(v => v.gap).sort((a, b) => b.money - a.money).slice(0, 3)) {
+    const income = g.vacant * dailyRate();
+    add('idea', `${g.room.name} ${ymLabel(g.ym)}空着可做日租`,
+      `空 ${vacancySpan(g.ym, g)}（${g.vacant} 天），${esc(g.next.tenant_name)} ${g.next.contract_start} 才来。` +
+      `按 ${rm(dailyRate())}/晚约收 ${rm(income)}` +
+      (income > g.money ? `，比空着少收的 ${rm(g.money)} 还多` : ''),
+      income, { tab: 'stays', label: '记日租' });
+  }
+
+  // 刻意不做「连续 N 个月空置」那类建议：合约到期后还没登记下一位，
+  // 不等于那几个月真的会空。按未续约去推，每间房都会算出十来个月的天文数字，
+  // 既不准又会把真正要紧的事淹掉。真正可行的提醒是下面那条「60 天内到期没人接」。
+
+  // ---- 押金兑付 ----
+  const dep = totalDeposits();
+  const { rmTotal } = accountsInRM();
+  if (dep > 0 && rmTotal < dep) {
+    add('todo', '押金不够退',
+      `押金负债 ${rm(dep)}，账户折马币只有 ${rm(rmTotal)}`,
+      dep - rmTotal, { tab: 'money', label: '看账户' });
+  }
+
+  // ---- 汇率 ----
+  const imp = impliedRate();
+  if (imp && (fxRate() - imp.rate) / fxRate() > 0.03) {
+    add('todo', '设定汇率该更新了',
+      `最近 ${imp.n} 笔实际换到 ${imp.rate.toFixed(4)}，设定值还是 ${fxRate()}`,
+      0, { tab: 'money', label: '去改' });
+  }
+
+  const rank = { urgent: 0, todo: 1, idea: 2 };
+  return out.sort((a, b) =>
+    rank[a.level] - rank[b.level] || a.pin - b.pin || b.money - a.money);
+}
+
+// 各类分别限额，而不是取总数的前 N 条 —— 否则催收条目一多，
+// 「空档能做日租」这种真能多赚钱的建议就永远排不进来。
+const BRIEF_CAP = { urgent: 4, todo: 3, idea: 2 };
+
+function briefingHTML() {
+  const all = briefing();
+  const left = { ...BRIEF_CAP };
+  const items = all.filter(it => left[it.level]-- > 0);
+  const hidden = all.length - items.length;
+  const mp = monthProgress();
+  if (!items.length) {
+    return `<div class="card"><h2>本月要做的事</h2>
+      <div class="empty">没有待办 —— 租金收齐、电费录好、也没有空房 🎉</div></div>`;
+  }
+  const badge = { urgent: ['催收', 'bad'], todo: ['要办', 'warn'], idea: ['可优化', 'flat'] };
+  return `<div class="card">
+    <h2>本月要做的事 <span class="sub">${all.length} 项${hidden ? `，列出前 ${items.length}` : ''}</span></h2>
+    ${items.map(it => {
+      const [txt, cls] = badge[it.level];
+      const btn = it.action
+        ? (it.action.room
+            ? `<button class="linkish" data-room="${it.action.room}">${it.action.label}</button>`
+            : `<button class="linkish" data-tab="${it.action.tab}">${it.action.label}</button>`)
+        : '';
+      return `<div class="collect-row">
+        <div class="left">
+          <div class="who"><span class="pill ${cls}">${txt}</span> ${esc(it.title)}</div>
+          ${it.detail ? `<div class="sub">${it.detail}</div>` : ''}
+          ${btn ? `<div style="margin-top:6px">${btn}</div>` : ''}
+        </div>
+        ${it.money ? `<span class="row-rent" style="color:var(--${
+          it.level === 'idea' ? 'accent' : it.level === 'urgent' ? 'bad' : 'warn'})">${rm(it.money)}</span>` : ''}
+      </div>`;
+    }).join('')}
+    ${hidden ? `<div class="hero-sub" style="margin-top:10px">
+      另有 ${hidden} 项较次要的没列出来。</div>` : ''}
+    <div class="hero-sub" style="margin-top:12px">
+      按紧急程度和金额排的。${mp.overdue > 0
+        ? `本月还有 <b style="color:var(--bad)">${rm(mp.overdueAmt)}</b> 逾期没收。`
+        : ''}绿色那几条是能多赚的，不做也不亏。
+    </div>
+  </div>`;
+}
+
 function viewDashboard() {
   const mp = monthProgress();
-  // 空调费次月收，所以现在该处理的是上个月那张电费单
-  const ac = airconStats(billYM());
-  const thisMonthLabel = ymLabel(thisYM()).replace(/^\d+年/, '');
   const pct = mp.due > 0 ? Math.round(mp.got / mp.due * 100) : 0;
 
   // 空房 / 待入住
@@ -478,17 +611,7 @@ function viewDashboard() {
       : (mp.outstanding > 0 ? ` · 还差 <b>${rm(mp.outstanding)}</b>，都还没到收租日` : ' · 本月已收齐 🎉')}</div>
   </div>
 
-  ${ac.missing > 0 ? `<div class="card" style="border-color:var(--warn)">
-    <h2>⏰ ${ymLabel(billYM())}电费还没记录 <span class="sub">${thisMonthLabel}收</span></h2>
-    <p style="margin:0 0 12px;font-size:14px;color:var(--text-2)">
-      还有 <b>${ac.missing}</b> 个租客没填金额。看完电单去「收租」页逐个填，再打勾收款。
-    </p>
-    <button class="primary" data-tab="collect">去填电费</button>
-  </div>` : (ac.outstanding > 0 ? `<div class="card">
-    <h2>${ymLabel(billYM())}电费 <span class="sub">${ac.paidCount} / ${ac.total} 已收</span></h2>
-    <div class="hero-sub">合计 ${rm(ac.billed)}，已收 ${rm(ac.collected)}，
-      还差 <b style="color:var(--bad)">${rm(ac.outstanding)}</b>。</div>
-  </div>` : '')}
+  ${briefingHTML()}
 
   <div class="card">
     <h2>关键数字</h2>
