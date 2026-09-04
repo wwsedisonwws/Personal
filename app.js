@@ -200,6 +200,60 @@ function airconStats(ym = thisYM()) {
            missing: list.length - recorded, outstanding: billed - collected };
 }
 
+const daysInMonth = ym => { const [y, m] = ym.split('-').map(Number); return new Date(y, m, 0).getDate(); };
+
+// 这间房这个月空几天。合约中途起讫时算部分空置 ——
+// WeiQing 11/19 到期，十一月是空 11 天而不是整月，两者差很多钱。
+function vacancyOf(room, ym) {
+  if (room.self_occupied) return null;
+  const total = daysInMonth(ym);
+  const mStart = `${ym}-01`, mEnd = `${ym}-${pad2(total)}`;
+  let covered = 0;
+  for (const t of DB.tenancies) {
+    if (t.room_id !== room.id || !LIVE(t)) continue;
+    const a = t.contract_start > mStart ? t.contract_start : mStart;
+    const b = t.contract_end   < mEnd   ? t.contract_end   : mEnd;
+    if (a <= b) covered += daysBetween(a, b) + 1;
+  }
+  const vacant = Math.max(0, total - covered);
+  return vacant > 0 ? { vacant, total } : null;
+}
+
+// 这间房该按多少钱估算损失：在住 → 已预订 → 最近一位住过的 → 参考租金
+function roomRent(room) {
+  const t = activeTenancy(room.id) || bookedTenancy(room.id);
+  if (t) return num(t.monthly_rent);
+  const past = DB.tenancies.filter(x => x.room_id === room.id)
+    .sort((a, b) => b.contract_end.localeCompare(a.contract_end))[0];
+  return num(past?.monthly_rent) || num(room.reference_rent);
+}
+
+// 未来 N 个月的空房。分两种，因为该采取的行动完全不同：
+//   空档   —— 后面已经有租客了，中间这段断了，是实打实在漏钱
+//   到期未续 —— 后面还没人，这是「该找租客了」，跟未来收入推算讲的是同一件事
+function vacancyCalendar(months = 12) {
+  const out = [];
+  for (let i = 0; i < months; i++) {
+    const ym = addMonthsYM(thisYM(), i);
+    const mEnd = `${ym}-${pad2(daysInMonth(ym))}`;
+    for (const room of DB.rooms) {
+      const v = vacancyOf(room, ym);
+      if (!v) continue;
+      // 后面还有没有租客要来？有就是空档，没有就是到期未续。
+      // 比的是月初而不是月末 —— Hansen 10/15 入住，十月前半空着同样是空档，
+      // 拿月末去比会把这种月内到来的漏掉。
+      const next = DB.tenancies
+        .filter(t => t.room_id === room.id && LIVE(t) && t.contract_start > `${ym}-01`)
+        .sort((a, b) => a.contract_start.localeCompare(b.contract_start))[0];
+      out.push({
+        ym, room, ...v, gap: !!next, next,
+        money: roomRent(room) * v.vacant / v.total,
+      });
+    }
+  }
+  return out;
+}
+
 // 房间当下的真实状态。关键：合约还没开始 = 房子现在是空的，
 // 上一版只看 contract_end，把「10月才入住」显示成「出租中」，白白空了六周没人发现。
 function roomStatus(room) {
@@ -339,6 +393,12 @@ function viewDashboard() {
 
   const fullRent = DB.tenancies.filter(t => t.status === 'active')
     .reduce((s, t) => s + num(t.monthly_rent), 0);
+  const vac = vacancyCalendar(12);
+  const gaps = vac.filter(v => v.gap);
+  const horizon = addMonthsYM(thisYM(), 2);
+  const soon = vac.filter(v => !v.gap && v.ym <= horizon);
+  // 3 个月之后还没续约的房间数（按房间去重，不然同一间会数很多次）
+  const later = new Set(vac.filter(v => !v.gap && v.ym > horizon).map(v => v.room.id)).size;
   const booked = DB.tenancies.filter(t => t.status === 'booked')
     .sort((a, b) => a.contract_start.localeCompare(b.contract_start));
 
@@ -396,6 +456,52 @@ function viewDashboard() {
       </div>`;
     }).join('')}
   </div>` : ''}
+
+  ${gaps.length ? `
+  <div class="card" style="border-color:var(--bad)">
+    <h2>空档 <span class="sub">下一位已经定了，中间断了</span></h2>
+    ${gaps.map(g => {
+      const p = DB.properties.find(x => x.id === g.room.property_id);
+      return `<button class="row" data-room="${g.room.id}">
+        <div class="row-top">
+          <span class="row-name">${ymLabel(g.ym)} · ${esc(g.room.name)}</span>
+          <span class="row-rent" style="color:var(--bad)">约 ${rm(g.money)}</span>
+        </div>
+        <div class="row-meta">
+          <span>${esc(p?.name || '')}</span>
+          <span class="pill bad">空 ${g.vacant === g.total ? '整月' : g.vacant + ' 天'}</span>
+          <span class="muted">${esc(g.next.tenant_name)} ${g.next.contract_start} 才来</span>
+        </div>
+      </button>`;
+    }).join('')}
+    <div class="hero-sub" style="margin-top:12px">
+      合计少收约 <b style="color:var(--bad)">${rm(gaps.reduce((s, g) => s + g.money, 0))}</b>。
+      这几段前后都有租客，中间才是真的空 —— 谈提前入住、延后退租，或拿来做日租。
+    </div>
+  </div>` : ''}
+
+  ${soon.length ? `
+  <div class="card">
+    <h2>近 3 个月待出租 <span class="sub">合约到期还没有下一位</span></h2>
+    ${soon.map(g => {
+      const p = DB.properties.find(x => x.id === g.room.property_id);
+      return `<button class="row" data-room="${g.room.id}">
+        <div class="row-top">
+          <span class="row-name">${ymLabel(g.ym)} · ${esc(g.room.name)}</span>
+          <span class="row-rent" style="color:var(--warn)">约 ${rm(g.money)}</span>
+        </div>
+        <div class="row-meta">
+          <span>${esc(p?.name || '')}</span>
+          <span class="pill warn">空 ${g.vacant === g.total ? '整月' : g.vacant + ' 天'}</span>
+        </div>
+      </button>`;
+    }).join('')}
+    ${later > 0 ? `<div class="hero-sub" style="margin-top:12px">
+      3 个月之后还有 <b>${later}</b> 间的合约陆续到期且尚未续约。
+      那属于长期规划，看下面「未来 12 个月」的收入曲线更清楚。
+    </div>` : ''}
+  </div>` : (gaps.length ? '' : `<div class="card"><h2>空房</h2>
+    <div class="empty">近 3 个月没有空档，全部排满了 🎉</div></div>`)}
 
   ${expiring.length ? `
   <div class="card">
