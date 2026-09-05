@@ -74,6 +74,8 @@ export function successorOf(db: DB, t: Row) {
 
 export interface Ev {
   date: string; kind: string; who: string; where: string; todo: string; uid: string;
+  // 'HH:MM'，只有看房这类有钟点的事件才带。入住/退房/日租是按天算的，不填。
+  time?: string;
 }
 
 // 还在谈的看房预约。跟 app.js 的 openViewings 是同一条规则 ——
@@ -126,6 +128,7 @@ export function events(db: DB, today: string, days = 180): Ev[] {
              v.want_from && `想 ${Number(v.want_from.slice(5, 7))} 月入住`,
              v.phone && `电话 ${v.phone}`].filter(Boolean).join(' · ') || '带看',
       uid: `view-${v.id}`,
+      time: v.viewing_time || undefined,
     });
   }
 
@@ -224,6 +227,21 @@ const esc = (s: string) => String(s ?? '')
 
 // 日历订阅。UID 稳定 —— 刷新时是更新而不是堆出重复事件；
 // 合约改期后旧事件会自动消失。
+// 本地墙上时间 → ICS 的 UTC 时间戳，默认一小时。
+//
+// 直接减 8 小时，不用 TZID=Asia/Kuala_Lumpur：TZID 严格来说要配一段 VTIMEZONE，
+// 少了有些日历客户端会解错。**马来西亚固定 UTC+8、从不用夏令时**，
+// 所以这个减法永远准确 —— 这条前提如果哪天不成立了，要回来改的就是这里。
+const MY_OFFSET_H = 8;
+
+function utcStamps(date: string, time: string, hours = 1) {
+  const [h, m] = time.split(':').map(Number);
+  const start = new Date(Date.parse(`${date}T00:00:00Z`) + (h - MY_OFFSET_H) * 3600_000 + m * 60_000);
+  const end = new Date(start.getTime() + hours * 3600_000);
+  const fmt = (d: Date) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  return { start: fmt(start), end: fmt(end) };
+}
+
 export function toICS(evs: Ev[], now = new Date()) {
   const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const lines = [
@@ -233,14 +251,25 @@ export function toICS(evs: Ev[], now = new Date()) {
   ];
   for (const e of evs) {
     const d = e.date.replace(/-/g, '');
+    // 带钟点的（看房）发定时事件，否则发全天事件。
+    // 全天的话，iPhone 日历把它堆在当天顶部、根本看不到「下午两点」，
+    // 提醒也只能在系统默认时刻响，不是该出门的时候。
+    const when = e.time ? utcStamps(e.date, e.time) : null;
     lines.push(
       'BEGIN:VEVENT',
       `UID:${e.uid}@rental.local`,
       `DTSTAMP:${stamp}`,
-      `DTSTART;VALUE=DATE:${d}`,
-      `DTEND;VALUE=DATE:${addDays(e.date, 1).replace(/-/g, '')}`,
+      ...(when
+        ? [`DTSTART:${when.start}`, `DTEND:${when.end}`]
+        : [`DTSTART;VALUE=DATE:${d}`,
+           `DTEND;VALUE=DATE:${addDays(e.date, 1).replace(/-/g, '')}`]),
       `SUMMARY:${esc(`${e.kind} ${e.who} · ${e.where}`)}`,
       `DESCRIPTION:${esc(e.todo)}`,
+      // 定时的给两个提醒：前一天好安排，出门前一小时是真正要紧的那个
+      ...(when
+        ? ['BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT1H',
+           `DESCRIPTION:${esc(`一小时后：${e.kind} ${e.who}`)}`, 'END:VALARM']
+        : []),
       'BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-P1D',
       `DESCRIPTION:${esc(`明天：${e.kind} ${e.who}`)}`, 'END:VALARM',
       'END:VEVENT',
