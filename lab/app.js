@@ -513,7 +513,7 @@ function render() {
 
   const views = {
     dash: viewDashboard, collect: viewCollect, rooms: viewRooms,
-    stays: viewStays, money: viewMoney,
+    viewings: viewViewings, stays: viewStays, money: viewMoney,
   };
   const keep = UI.keepScroll ? window.scrollY : 0;
   $('#main').innerHTML = UI.roomId ? viewRoomDetail() : views[UI.tab]();
@@ -618,9 +618,11 @@ function schedule(days = 90) {
 // 而没记下来的约等于没约。
 const VIEW_STATUS = { pending: '约了', done: '看过了', rented: '租了', passed: '不租了' };
 
-function viewingsHTML() {
+function viewViewings() {
   const open = DB.viewings.filter(v => v.status === 'pending' || v.status === 'done')
     .sort((a, b) => (a.viewing_on + a.viewing_time).localeCompare(b.viewing_on + b.viewing_time));
+  const done = DB.viewings.filter(v => v.status === 'rented' || v.status === 'passed')
+    .sort((a, b) => b.viewing_on.localeCompare(a.viewing_on));
   const rentable = DB.rooms.filter(r => !r.self_occupied);
   const today = todayISO();
 
@@ -652,7 +654,7 @@ function viewingsHTML() {
           <button class="linkish" data-delviewing="${v.id}" style="font-size:11px;color:var(--muted)">删除</button>
         </div>
       </div>`;
-    }).join('') : '<div class="empty">还没有人约看房。电话里约好了就记在这里，会进接待日程和 iPhone 日历。</div>'}
+    }).join('') : '<div class="empty">还没有人约看房。电话里约好了就记在这里 —— 会进总览的接待日程，也会进 iPhone 日历。</div>'}
 
     <form id="viewing-form" class="form" style="margin-top:16px;border-top:2px dotted var(--border);padding-top:16px">
       <div class="field wide"><label for="v-room">新增预约 · 哪间房</label>
@@ -672,7 +674,26 @@ function viewingsHTML() {
         <input type="text" id="v-note" placeholder="谈的价钱、特别要求…"></div>
       <div class="actions wide"><button type="submit" class="primary">记下来</button></div>
     </form>
-  </div>`;
+  </div>
+
+  ${done.length ? `<div class="card">
+    <h2>已结束 <span class="sub">${done.length} 条</span></h2>
+    ${done.map(v => {
+      const room = DB.rooms.find(r => r.id === v.room_id);
+      return `<div class="row-meta" style="margin:0 0 10px">
+        <span class="pill ${v.status === 'rented' ? 'good' : 'flat'} plain">${VIEW_STATUS[v.status]}</span>
+        <span>${v.viewing_on}</span>
+        <span><b>${esc(v.name || '（未留名）')}</b></span>
+        <span class="muted">${esc(room?.name || '（已删除）')}</span>
+        ${v.note ? `<span class="muted">${esc(v.note)}</span>` : ''}
+        <button class="linkish" data-delviewing="${v.id}"
+          style="font-size:11px;color:var(--muted)">删除</button>
+      </div>`;
+    }).join('')}
+    <div class="hint muted" style="font-size:12px;margin-top:6px">
+      留着当记录：同一间房被看过几次、都是什么理由没成，下次定价时有用。
+    </div>
+  </div>` : ''}`;
 }
 
 function scheduleHTML() {
@@ -904,7 +925,6 @@ function viewDashboard() {
 
   ${briefingHTML()}
 
-  ${viewingsHTML()}
   ${scheduleHTML()}
 
   <div class="card">

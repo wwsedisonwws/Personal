@@ -139,7 +139,9 @@ body.lab #topbar .title::before { content: "🧪 "; }
 /* 分页导航：窄屏可横滑，但每个 tab 本身不被裁 */
 #tabs {
   position: sticky; top: var(--bar-h); z-index: 19;
-  display: flex; gap: 7px; padding: 10px 16px;
+  /* gap 与按钮内边距是按「六个分页要在 360px 上放得下」倒推的：
+     6×49 + 5×5 + 32 = 351。放宽一点就会挤出屏幕，而最后那个是「账户」。 */
+  display: flex; gap: 5px; padding: 10px 16px;
   background: var(--bg);
   overflow-x: auto; -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
@@ -152,7 +154,7 @@ body.lab #topbar .title::before { content: "🧪 "; }
      竖排后宽度回到文字本身的宽度，只多花十几像素高度。 */
   display: flex; flex-direction: column; align-items: center; gap: 1px;
   font: inherit; font-size: 13.5px; font-weight: 700; line-height: 1.25;
-  padding: 6px 13px; border-radius: 18px;
+  padding: 6px 9px; border-radius: 18px;
   border: 2px solid var(--border); background: var(--surface); color: var(--text-2);
   cursor: pointer;
 }
@@ -163,7 +165,8 @@ body.lab #topbar .title::before { content: "🧪 "; }
 #tabs button::before { font-size: 15px; line-height: 1.1; }
 #tabs button[data-tab="dash"]::before    { content: "🏠"; }
 #tabs button[data-tab="collect"]::before { content: "💰"; }
-#tabs button[data-tab="rooms"]::before   { content: "🚪"; }
+#tabs button[data-tab="rooms"]::before    { content: "🚪"; }
+#tabs button[data-tab="viewings"]::before { content: "👀"; }
 #tabs button[data-tab="stays"]::before   { content: "🌙"; }
 #tabs button[data-tab="money"]::before   { content: "🐷"; }
 
