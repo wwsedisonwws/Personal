@@ -139,7 +139,9 @@ body.lab #topbar .title::before { content: "🧪 "; }
 /* 分页导航：窄屏可横滑，但每个 tab 本身不被裁 */
 #tabs {
   position: sticky; top: var(--bar-h); z-index: 19;
-  display: flex; gap: 7px; padding: 10px 16px;
+  /* gap 与按钮内边距是按「六个分页要在 360px 上放得下」倒推的：
+     6×49 + 5×5 + 32 = 351。放宽一点就会挤出屏幕，而最后那个是「账户」。 */
+  display: flex; gap: 5px; padding: 10px 16px;
   background: var(--bg);
   overflow-x: auto; -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
@@ -152,7 +154,7 @@ body.lab #topbar .title::before { content: "🧪 "; }
      竖排后宽度回到文字本身的宽度，只多花十几像素高度。 */
   display: flex; flex-direction: column; align-items: center; gap: 1px;
   font: inherit; font-size: 13.5px; font-weight: 700; line-height: 1.25;
-  padding: 6px 13px; border-radius: 18px;
+  padding: 6px 9px; border-radius: 18px;
   border: 2px solid var(--border); background: var(--surface); color: var(--text-2);
   cursor: pointer;
 }
@@ -163,7 +165,8 @@ body.lab #topbar .title::before { content: "🧪 "; }
 #tabs button::before { font-size: 15px; line-height: 1.1; }
 #tabs button[data-tab="dash"]::before    { content: "🏠"; }
 #tabs button[data-tab="collect"]::before { content: "💰"; }
-#tabs button[data-tab="rooms"]::before   { content: "🚪"; }
+#tabs button[data-tab="rooms"]::before    { content: "🚪"; }
+#tabs button[data-tab="viewings"]::before { content: "👀"; }
 #tabs button[data-tab="stays"]::before   { content: "🌙"; }
 #tabs button[data-tab="money"]::before   { content: "🐷"; }
 
@@ -291,6 +294,34 @@ main { padding: 6px 16px 80px; max-width: 780px; margin: 0 auto; }
   border: 2px solid var(--border); background: var(--surface-2); color: var(--text);
 }
 .field textarea { min-height: 60px; resize: vertical; }
+
+/* 三种控件本来是三个高度：select 43、文字框 48.8、日期/时间 50.8 ——
+   一列排下来就是参差的。统一成文字框那个高度，算式跟它的盒模型一致：
+     内容 1.55em（line-height 1.55 × font-size 16px = 24.8）
+   + 上下 padding 10+10 + 上下 border 2+2 = 24
+   写成 calc 而不是硬编 48.8px，改字号或 padding 时不会失配。 */
+.field input:not([type="file"]),
+.field select { height: calc(1.55em + 24px); }
+
+/* iOS Safari 的 date / time 是原生控件，不是普通输入框，有两个毛病：
+     ① 自带内在宽度，不理 width:100% —— 会比同一列其他输入框宽出一截
+     ② 值默认居中，而别的框是靠左，一列看下来就是没对齐
+   桌面 Chromium 两个都不复现（量出来一律 322px、一律靠左），
+   所以只能按成因改，改完得在真机上看。 */
+.field input[type="date"],
+.field input[type="time"] {
+  -webkit-appearance: none;   /* 去掉原生外观，宽度才肯听 width:100% */
+  appearance: none;
+  min-width: 0;               /* 允许收缩到容器宽度 */
+}
+/* 值的对齐由这个 WebKit 伪元素管，光在 input 上写 text-align 不生效 */
+.field input[type="date"]::-webkit-date-and-time-value,
+.field input[type="time"]::-webkit-date-and-time-value {
+  text-align: left;
+}
+/* 没填值时 iOS 会把占位文字也居中 */
+.field input[type="date"]::-webkit-datetime-edit,
+.field input[type="time"]::-webkit-datetime-edit { text-align: left; }
 .field input:focus, .field select:focus, .field textarea:focus {
   outline: 3px solid var(--accent-soft); outline-offset: 0; border-color: var(--accent);
 }

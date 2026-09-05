@@ -88,7 +88,11 @@ async function loadAll() {
                   'short_stays', 'aircon_charges', 'viewings', 'app_settings'];
   const results = await Promise.all(tables.map(t => sb.from(t).select('*')));
 
-  const failed = results.find(r => r.error);
+  // viewings 是后加的表。若这个 Supabase 项目还没跑建表 SQL，只让看房那页停摆，
+  // 不能让收租、房间、账户跟着打不开 —— 一个刚加的可选功能不该有本事弄停整个应用。
+  const vIdx = tables.indexOf('viewings');
+  DB.viewingsMissing = !!results[vIdx].error;
+  const failed = results.find((r, i) => r.error && i !== vIdx);
   if (failed) throw failed.error;
 
   const [props, rooms, ten, pay, acc, stays, aircon, viewings, settings] = results.map(r => r.data || []);
@@ -99,7 +103,7 @@ async function loadAll() {
   DB.accounts = acc.sort((a, b) => a.sort_order - b.sort_order);
   DB.stays = stays.sort((a, b) => b.check_in.localeCompare(a.check_in));
   DB.aircon = aircon;
-  DB.viewings = viewings.sort((a, b) =>
+  DB.viewings = (viewings || []).sort((a, b) =>
     (a.viewing_on + a.viewing_time).localeCompare(b.viewing_on + b.viewing_time));
   DB.settings = settings[0] || null;
 
@@ -619,6 +623,14 @@ function schedule(days = 90) {
 const VIEW_STATUS = { pending: '约了', done: '看过了', rented: '租了', passed: '不租了' };
 
 function viewViewings() {
+  if (DB.viewingsMissing) return `
+  <div class="card">
+    <h2>看房预约</h2>
+    <div class="banner warn">这个 Supabase 项目还没建 <code>viewings</code> 表。</div>
+    <p class="hero-sub">去 Supabase 后台 → SQL Editor，把 <code>supabase/schema.sql</code>
+      里「看房预约」那一段跑一次就好。其余功能不受影响，照常用。</p>
+  </div>`;
+
   const open = DB.viewings.filter(v => v.status === 'pending' || v.status === 'done')
     .sort((a, b) => (a.viewing_on + a.viewing_time).localeCompare(b.viewing_on + b.viewing_time));
   const done = DB.viewings.filter(v => v.status === 'rented' || v.status === 'passed')
