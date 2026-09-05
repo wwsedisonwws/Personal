@@ -291,6 +291,26 @@ main { padding: 6px 16px 80px; max-width: 780px; margin: 0 auto; }
   border: 2px solid var(--border); background: var(--surface-2); color: var(--text);
 }
 .field textarea { min-height: 60px; resize: vertical; }
+
+/* iOS Safari 的 date / time 是原生控件，不是普通输入框，有两个毛病：
+     ① 自带内在宽度，不理 width:100% —— 会比同一列其他输入框宽出一截
+     ② 值默认居中，而别的框是靠左，一列看下来就是没对齐
+   桌面 Chromium 两个都不复现（量出来一律 322px、一律靠左），
+   所以只能按成因改，改完得在真机上看。 */
+.field input[type="date"],
+.field input[type="time"] {
+  -webkit-appearance: none;   /* 去掉原生外观，宽度才肯听 width:100% */
+  appearance: none;
+  min-width: 0;               /* 允许收缩到容器宽度 */
+}
+/* 值的对齐由这个 WebKit 伪元素管，光在 input 上写 text-align 不生效 */
+.field input[type="date"]::-webkit-date-and-time-value,
+.field input[type="time"]::-webkit-date-and-time-value {
+  text-align: left;
+}
+/* 没填值时 iOS 会把占位文字也居中 */
+.field input[type="date"]::-webkit-datetime-edit,
+.field input[type="time"]::-webkit-datetime-edit { text-align: left; }
 .field input:focus, .field select:focus, .field textarea:focus {
   outline: 3px solid var(--accent-soft); outline-offset: 0; border-color: var(--accent);
 }
