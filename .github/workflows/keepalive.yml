@@ -19,29 +19,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 从 config.js 读取连接参数
+      # 生产站和试验站是两个 Supabase 项目，各自会睡着，所以两个都要 ping。
+      # 试验站还没建（lab/config.js 还是占位符）时跳过它，不算失败。
+      - name: 列出要 ping 的项目
         id: cfg
         run: |
           node -e '
-            global.window = {};
-            require("./config.js");
-            const c = window.SUPABASE_CONFIG || {};
-            if (!c.url || c.url.includes("你的")) {
-              console.error("config.js 还没填好，跳过");
-              process.exit(78);
+            const out = [];
+            for (const [name, path] of [["生产站","./config.js"],["试验站","./lab/config.js"]]) {
+              global.window = {};
+              try { require(path); } catch { console.error(`${name}：没有 ${path}，跳过`); continue; }
+              const c = window.SUPABASE_CONFIG || {};
+              // 跟网页同一套判断：验网址格式，而不是找某句占位符
+              if (!/^https:\/\/[a-z0-9-]+\.supabase\.co/i.test(String(c.url || "").trim())) {
+                console.error(`${name}：${path} 还没填好，跳过`);
+                continue;
+              }
+              out.push(`${name} ${c.url} ${c.anonKey}`);
             }
-            console.log(`url=${c.url}`);
-            console.log(`key=${c.anonKey}`);
+            if (!out.length) { console.error("两个都没填好，无事可做"); process.exit(78); }
+            console.log("targets<<EOF");
+            console.log(out.join("\n"));
+            console.log("EOF");
           ' >> "$GITHUB_OUTPUT"
 
       - name: Ping Supabase
         run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
-            -H "apikey: ${{ steps.cfg.outputs.key }}" \
-            "${{ steps.cfg.outputs.url }}/rest/v1/")
-          echo "HTTP $code"
-          # 401 也算活着 —— 服务在跑，只是这个端点要求更完整的凭证。
-          case "$code" in
-            200|401|404) echo "✅ 项目醒着" ;;
-            *) echo "❌ 异常，可能已暂停，去 Supabase 后台看看"; exit 1 ;;
-          esac
+          fail=0
+          while read -r name url key; do
+            [ -z "$name" ] && continue
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+              -H "apikey: $key" "$url/rest/v1/")
+            # 401 也算活着 —— 服务在跑，只是这个端点要求更完整的凭证。
+            case "$code" in
+              200|401|404) echo "✅ $name 醒着（HTTP $code）" ;;
+              *) echo "❌ $name 异常（HTTP $code），可能已暂停，去 Supabase 后台看看"; fail=1 ;;
+            esac
+          done <<'TARGETS'
+          ${{ steps.cfg.outputs.targets }}
+          TARGETS
+          exit $fail

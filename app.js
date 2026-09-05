@@ -1967,11 +1967,18 @@ document.addEventListener('submit', async ev => {
 
 async function boot() {
   const cfg = window.SUPABASE_CONFIG || {};
-  if (!cfg.url || !cfg.anonKey || cfg.url.includes('你的')) {
+  // 验网址长得对不对，而不是找某句占位符：占位符换个写法就漏过去了，
+  // 而 createClient 拿到不是网址的字符串会直接抛错 —— 结果是白屏，连提示都看不到。
+  const ready = /^https:\/\/[a-z0-9-]+\.supabase\.co/i.test(String(cfg.url || '').trim())
+                && String(cfg.anonKey || '').length > 20;
+  if (!ready) {
+    const file = IS_LAB ? 'lab/config.js' : 'config.js';
     document.body.innerHTML = `<div id="login">
-      <h1>还没接上 Supabase</h1>
-      <p>请编辑仓库里的 <code>config.js</code>，填入 Supabase 的 Project URL 和 anon key。
-      步骤见 <code>README.md</code>。</p></div>`;
+      <h1>${IS_LAB ? '试验站' : '还没'}接上 Supabase</h1>
+      <p>请编辑仓库里的 <code>${file}</code>，填入${IS_LAB ? '<b>第二个</b>' : ''}
+      Supabase 项目的 Project URL 和 anon key。步骤见 <code>README.md</code>。</p>
+      ${IS_LAB ? '<p class="muted">填成生产站那个项目的话，在这里改数据就会动到真资料。</p>' : ''}
+      </div>`;
     return;
   }
 

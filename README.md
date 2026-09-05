@@ -213,13 +213,30 @@ curl "https://你的项目.supabase.co/rest/v1/tenancies?select=*" \
 
 ### 建试验站（一次性）
 
-1. Supabase 新建第二个项目，比如叫 `rental-lab`（免费版可以开两个）
-2. 在它的 SQL Editor 跑一遍 `supabase/schema.sql`
-3. 把它的 Project URL 和 anon key 填进 `lab/config.js`（`isLab: true` 那行别删）
-4. push 之后打开 `…github.io/Personal/lab/`，用同一个邮箱登录
+1. Supabase 新建第二个项目，比如叫 `rental-lab`，地区同样选 Singapore
+   （免费版一般只让开 2 个活跃项目，这刚好是第 2 个）
+2. 在它的 SQL Editor 跑一遍 `supabase/schema.sql`。**别跑 `seed.sql`** ——
+   第 5 步会用真实备份灌进去，比那份初始数据新
+3. **Authentication → URL Configuration** ← 最容易漏
+   - Site URL：`https://wwsedisonwws.github.io/Personal/lab/`
+   - Redirect URLs 加同一条
+
+   末尾 `/lab/` 不能少。漏了这步，登录邮件里的链接会把你送去生产站或 localhost。
+4. 把它的 Project URL 和 anon key 填进 `lab/config.js`（`isLab: true` 那行别删），
+   push。打开 `…github.io/Personal/lab/` —— 顶栏该是**橙色**，登进去该是**空的**
 5. 在生产站点「下载备份」，到试验站「清空并恢复」，试验站就有了一份一模一样的资料
 
 第 5 步顺带把备份**验了一次**：能恢复的才叫备份，只导出没试过恢复的不算。
+
+### 验一次隔离，别只是相信文档
+
+在**试验站**改点显眼的 —— 账户余额改成 1，或者删掉一间房。回**生产站**刷新。
+
+**生产站必须一点没变。** 变了就是两边连同一个库，`lab/config.js` 填成生产项目了，
+立刻停下来改回去。这条是整件事成立与否的唯一证据，值得花两分钟。
+
+> 两个项目都会被 `keepalive.yml` 每周 ping 一次，不会睡着。
+> 试验站没配好时它自动跳过，不算失败。
 
 ### 改动的流程
 
