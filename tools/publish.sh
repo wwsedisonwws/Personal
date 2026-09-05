@@ -7,6 +7,9 @@ cd "$(dirname "$0")/.."
 
 # 上线前验一次两个 config，两个站连成同一个项目就别推了。
 node tools/check-config.js
+# 生成的 bundled.ts 最危险的失败方式是悄悄过期：改了逻辑忘了重新生成，
+# 房东照旧去粘，部署上去的是旧代码，而且哪里都不报错。
+node tools/check-fn.js
 
 cp lab/index.html lab/app.js lab/styles.css .
 "$(dirname "$0")/bump.sh" index.html

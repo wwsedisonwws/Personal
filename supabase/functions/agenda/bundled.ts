@@ -1,0 +1,412 @@
+// ⚠️ 这个文件是**生成的**，别直接改它。
+//
+// 改逻辑请改 rules.ts 或 index.ts，然后跑 node tools/build-fn.js 重新生成。
+// 它的用途只有一个：在 Supabase 网页编辑器里当作 index.ts 粘贴，
+// 一个文件、没有 import，不会再出现 "Module not found: rules.ts"。
+//
+// 生成自：rules.ts + index.ts
+
+// 提醒用的业务规则。
+//
+// ⚠️ 这是 app.js 里那套规则的第二份实现 —— Deno 跑不了浏览器那份。
+//    改规则时两处都要改。为了少一点漂移的机会，这里只放提醒真正需要的最窄一组：
+//    入住/退房、收租日、电费所属月份、到期招租。
+//    空档、汇率、押金覆盖那些留在网页上，不进提醒。
+//
+// 本文件不碰网络、不读环境变量，纯函数 —— 好让本地拿 mock 数据跑断言，
+// 逐条比对网页那张「接待日程」卡的输出。
+
+export type Row = Record<string, any>;
+export interface DB {
+  properties: Row[]; rooms: Row[]; tenancies: Row[];
+  payments: Row[]; aircon: Row[]; stays: Row[]; viewings: Row[];
+}
+
+/* ---------------------------------------------------------------- 日期 */
+const pad2 = (n: number) => String(n).padStart(2, '0');
+export const daysBetween = (a: string, b: string) =>
+  Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 86400000);
+export function addDays(iso: string, n: number) {
+  const d = new Date(Date.parse(iso + 'T00:00:00Z') + n * 86400000);
+  return d.toISOString().slice(0, 10);
+}
+export function addMonthsYM(ym: string, k: number) {
+  const [y, m] = ym.split('-').map(Number);
+  const t = y * 12 + (m - 1) + k;
+  return `${Math.floor(t / 12)}-${pad2((t % 12) + 1)}`;
+}
+const WEEK = ['日', '一', '二', '三', '四', '五', '六'];
+export const weekday = (iso: string) => '周' + WEEK[new Date(iso + 'T00:00:00Z').getUTCDay()];
+export const rm = (n: any) => 'RM' + Math.round(Number(n) || 0).toLocaleString('en-US');
+const ymOf = (iso: string) => iso.slice(0, 7);
+const LIVE = (t: Row) => t.status === 'active' || t.status === 'booked';
+
+/* ---------------------------------------------------------------- 规则 */
+
+// 电费次月收：今天该处理的是上个月那张单
+export const billYM = (today: string) => addMonthsYM(ymOf(today), -1);
+
+// 某月该收多少。首月若谈好按比例少收，用 first_month_rent
+export function rentFor(t: Row, ym: string) {
+  const first = ym === ymOf(t.contract_start);
+  return Number(first && t.first_month_rent != null ? t.first_month_rent : t.monthly_rent) || 0;
+}
+
+// 某月的收租日。首月按入住日算 —— 否则会出现「收租日早于入住日」
+export function dueDateOf(t: Row, ym: string) {
+  const day = Math.min(Math.max(Number(t.rent_due_day) || 1, 1), 28);
+  const d = `${ym}-${pad2(day)}`;
+  return ym === ymOf(t.contract_start) && d < t.contract_start ? t.contract_start : d;
+}
+
+const isDue = (t: Row, ym: string) =>
+  ym >= ymOf(t.contract_start) && ym <= ymOf(t.contract_end);
+
+const paidFor = (db: DB, tenancyId: string, ym: string) =>
+  db.payments.some(p => p.tenancy_id === tenancyId && p.ym === ym);
+
+// 他走后第二天这间房还有没有人。
+// 不能只看「有没有人在他之后开始」—— 租客A 住到 10-31 而 租客B 10-15 就进同一间，
+// 那是重叠不是接替；也不能按月粒度判断。
+export function successorOf(db: DB, t: Row) {
+  const after = addDays(t.contract_end, 1);
+  const others = db.tenancies.filter(x => x.room_id === t.room_id && LIVE(x) && x.id !== t.id);
+  const covering = others.find(x => x.contract_start <= after && x.contract_end >= after);
+  if (covering) return { who: covering, kind: 'covering' as const };
+  const upcoming = others.filter(x => x.contract_start > after)
+    .sort((a, b) => a.contract_start.localeCompare(b.contract_start))[0];
+  return upcoming ? { who: upcoming, kind: 'upcoming' as const } : null;
+}
+
+/* ---------------------------------------------------------------- 事件 */
+
+export interface Ev {
+  date: string; kind: string; who: string; where: string; todo: string; uid: string;
+  // 'HH:MM'，只有看房这类有钟点的事件才带。入住/退房/日租是按天算的，不填。
+  time?: string;
+}
+
+// 还在谈的看房预约。跟 app.js 的 openViewings 是同一条规则 ——
+// 这是第二份实现，改一处就要改另一处，测试会逐条对账。
+export const openViewings = (db: DB, roomId: string) =>
+  db.viewings.filter(v => v.room_id === roomId && (v.status === 'pending' || v.status === 'done'));
+
+export function events(db: DB, today: string, days = 180): Ev[] {
+  const until = addDays(today, days);
+  const out: Ev[] = [];
+  const where = (roomId: string) => {
+    const room = db.rooms.find(r => r.id === roomId);
+    const prop = room && db.properties.find(p => p.id === room.property_id);
+    return `${prop?.name ?? ''} · ${room?.name ?? '（已删除）'}`;
+  };
+
+  for (const t of db.tenancies.filter(LIVE)) {
+    if (t.contract_start >= today && t.contract_start <= until) {
+      const ym = ymOf(t.contract_start);
+      const paid = paidFor(db, t.id, ym);
+      out.push({
+        date: t.contract_start, kind: '入住', who: t.tenant_name, where: where(t.room_id),
+        todo: `签合同、交钥匙 · 押金 ${rm(t.deposit)}` +
+          (paid ? ' · 首月租金已收' : ` · 首月租金 ${rm(rentFor(t, ym))} 待收`),
+        uid: `in-${t.id}-${t.contract_start}`,
+      });
+    }
+    if (t.contract_end >= today && t.contract_end <= until) {
+      const s = successorOf(db, t);
+      const looking = openViewings(db, t.room_id).length;
+      const tail = s
+        ? (s.kind === 'covering' ? ` · 房间由 ${s.who.tenant_name} 接着住`
+                                 : ` · 下一位 ${s.who.tenant_name} ${s.who.contract_start} 才来`)
+        : looking ? ` · 后面没人接，已有 ${looking} 组约看`
+        : ' · 后面没人接，要招租';
+      out.push({
+        date: t.contract_end, kind: '退房', who: t.tenant_name, where: where(t.room_id),
+        todo: `验房、退押金 ${rm(t.deposit)}` + tail,
+        uid: `out-${t.id}-${t.contract_end}`,
+      });
+    }
+  }
+
+  for (const v of db.viewings) {
+    if (v.status !== 'pending') continue;
+    if (v.viewing_on < today || v.viewing_on > until) continue;
+    out.push({
+      date: v.viewing_on, kind: '看房', who: v.name || '（未留名）', where: where(v.room_id),
+      todo: [v.viewing_time && `${v.viewing_time} 到`,
+             v.want_from && `想 ${Number(v.want_from.slice(5, 7))} 月入住`,
+             v.phone && `电话 ${v.phone}`].filter(Boolean).join(' · ') || '带看',
+      uid: `view-${v.id}`,
+      time: v.viewing_time || undefined,
+    });
+  }
+
+  for (const s of db.stays) {
+    const nights = Math.max(0, daysBetween(s.check_in, s.check_out));
+    const amt = s.amount == null ? nights * (Number(s.nightly_rate) || 0) : Number(s.amount);
+    if (s.check_in >= today && s.check_in <= until) {
+      out.push({
+        date: s.check_in, kind: '日租入住', who: s.guest_name || '（未填姓名）',
+        where: where(s.room_id), todo: `${nights} 晚 · ${rm(amt)}${s.paid ? ' 已收' : ' 待收'}`,
+        uid: `sin-${s.id}`,
+      });
+    }
+    if (s.check_out >= today && s.check_out <= until) {
+      out.push({
+        date: s.check_out, kind: '日租退房', who: s.guest_name || '（未填姓名）',
+        where: where(s.room_id), todo: '收钥匙、验房', uid: `sout-${s.id}`,
+      });
+    }
+  }
+  return out.sort((a, b) => a.date.localeCompare(b.date) || a.uid.localeCompare(b.uid));
+}
+
+/* ---------------------------------------------------------------- 每日摘要 */
+
+export interface Item { tag: string; text: string; }
+
+export function digest(db: DB, today: string): Item[] {
+  const out: Item[] = [];
+  const ym = ymOf(today);
+  const roomName = (id: string) => db.rooms.find(r => r.id === id)?.name ?? '';
+
+  // ① 三天内要接待的人
+  const soon = events(db, today, 3);
+  const byDate: Record<string, Ev[]> = {};
+  for (const e of soon) (byDate[e.date] ||= []).push(e);
+  for (const [date, list] of Object.entries(byDate)) {
+    const n = daysBetween(today, date);
+    const when = n === 0 ? '就是今天' : n === 1 ? '明天' : `${n} 天后`;
+    out.push({
+      tag: '接待',
+      text: `${date} ${weekday(date)}（${when}）\n` +
+        list.map(e => `　${e.kind} ${e.who} · ${e.where}\n　${e.todo}`).join('\n'),
+    });
+  }
+
+  // ② 今天该收的租 + 已逾期的
+  for (const t of db.tenancies.filter(LIVE)) {
+    if (!isDue(t, ym) || paidFor(db, t.id, ym)) continue;
+    const due = dueDateOf(t, ym);
+    if (due > today) continue;                       // 还没到日子，不催
+    const late = daysBetween(due, today);
+    out.push({
+      tag: late === 0 ? '今天收租' : '逾期',
+      text: `${t.tenant_name} · ${roomName(t.room_id)} · ${rm(rentFor(t, ym))}` +
+        (late === 0 ? '（今天是收租日）' : `（逾期 ${late} 天）`),
+    });
+  }
+
+  // ③ 上个月的电费还没录齐。只在 1–5 号提醒，账单刚出那几天。
+  const day = Number(today.slice(8));
+  if (day <= 5) {
+    const bym = billYM(today);
+    const owe = db.tenancies.filter(t => LIVE(t) && isDue(t, bym))
+      .filter(t => !db.aircon.some(a => a.tenancy_id === t.id && a.ym === bym));
+    if (owe.length) {
+      out.push({
+        tag: '电费',
+        text: `${bym} 的电费还有 ${owe.length} 位没填金额（${ym} 收）。看完电单去「收租」页逐个填。`,
+      });
+    }
+  }
+
+  // ④ 到期要招租 —— 只在跨阈值当天发。天天念等于没念。
+  const MARKS = [60, 30, 14, 7];
+  for (const t of db.tenancies.filter(LIVE)) {
+    const left = daysBetween(today, t.contract_end);
+    if (!MARKS.includes(left)) continue;
+    if (successorOf(db, t)) continue;
+    out.push({
+      tag: '招租',
+      text: `${roomName(t.room_id)} 还有 ${left} 天到期（${t.contract_end}，${t.tenant_name}），` +
+        (openViewings(db, t.room_id).length
+          ? `已有 ${openViewings(db, t.room_id).length} 组约看，跟进一下。`
+          : `后面没人接。空一个月少收 ${rm(t.monthly_rent)}。`),
+    });
+  }
+
+  return out;
+}
+
+/* ---------------------------------------------------------------- 输出 */
+
+const esc = (s: string) => String(s ?? '')
+  .replace(/[\\;,]/g, m => '\\' + m).replace(/\n/g, '\\n');
+
+// 日历订阅。UID 稳定 —— 刷新时是更新而不是堆出重复事件；
+// 合约改期后旧事件会自动消失。
+// 本地墙上时间 → ICS 的 UTC 时间戳，默认一小时。
+//
+// 直接减 8 小时，不用 TZID=Asia/Kuala_Lumpur：TZID 严格来说要配一段 VTIMEZONE，
+// 少了有些日历客户端会解错。**马来西亚固定 UTC+8、从不用夏令时**，
+// 所以这个减法永远准确 —— 这条前提如果哪天不成立了，要回来改的就是这里。
+const MY_OFFSET_H = 8;
+
+function utcStamps(date: string, time: string, hours = 1) {
+  const [h, m] = time.split(':').map(Number);
+  const start = new Date(Date.parse(`${date}T00:00:00Z`) + (h - MY_OFFSET_H) * 3600_000 + m * 60_000);
+  const end = new Date(start.getTime() + hours * 3600_000);
+  const fmt = (d: Date) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  return { start: fmt(start), end: fmt(end) };
+}
+
+export function toICS(evs: Ev[], now = new Date()) {
+  const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  const lines = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//出租房管理//ZH',
+    'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+    'X-WR-CALNAME:出租房日程', 'X-WR-TIMEZONE:Asia/Kuala_Lumpur',
+  ];
+  for (const e of evs) {
+    const d = e.date.replace(/-/g, '');
+    // 带钟点的（看房）发定时事件，否则发全天事件。
+    // 全天的话，iPhone 日历把它堆在当天顶部、根本看不到「下午两点」，
+    // 提醒也只能在系统默认时刻响，不是该出门的时候。
+    const when = e.time ? utcStamps(e.date, e.time) : null;
+    lines.push(
+      'BEGIN:VEVENT',
+      `UID:${e.uid}@rental.local`,
+      `DTSTAMP:${stamp}`,
+      ...(when
+        ? [`DTSTART:${when.start}`, `DTEND:${when.end}`]
+        : [`DTSTART;VALUE=DATE:${d}`,
+           `DTEND;VALUE=DATE:${addDays(e.date, 1).replace(/-/g, '')}`]),
+      `SUMMARY:${esc(`${e.kind} ${e.who} · ${e.where}`)}`,
+      `DESCRIPTION:${esc(e.todo)}`,
+      // 定时的给两个提醒：前一天好安排，出门前一小时是真正要紧的那个
+      ...(when
+        ? ['BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT1H',
+           `DESCRIPTION:${esc(`一小时后：${e.kind} ${e.who}`)}`, 'END:VALARM']
+        : []),
+      'BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-P1D',
+      `DESCRIPTION:${esc(`明天：${e.kind} ${e.who}`)}`, 'END:VALARM',
+      'END:VEVENT',
+    );
+  }
+  lines.push('END:VCALENDAR');
+  // RFC 5545 要求 CRLF
+  return lines.join('\r\n') + '\r\n';
+}
+
+const H = (s: string) => String(s ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+export function toEmail(items: Item[], today: string) {
+  const color: Record<string, string> = {
+    '逾期': '#B23A3A', '今天收租': '#C97A2B', '接待': '#1F6F5C',
+    '电费': '#C97A2B', '招租': '#B23A3A',
+  };
+  return `<div style="font-family:-apple-system,'PingFang SC',sans-serif;max-width:560px;
+    margin:0 auto;padding:20px;color:#1A1F1B">
+    <h2 style="font-size:17px;margin:0 0 4px">出租房 · ${today} ${weekday(today)}</h2>
+    <p style="font-size:13px;color:#8A958D;margin:0 0 18px">${items.length} 件事</p>
+    ${items.map(it => `<div style="border-left:3px solid ${color[it.tag] ?? '#8A958D'};
+      padding:8px 0 8px 12px;margin-bottom:14px">
+      <div style="font-size:12px;font-weight:600;color:${color[it.tag] ?? '#8A958D'}">${H(it.tag)}</div>
+      <div style="font-size:14px;white-space:pre-wrap;margin-top:3px">${H(it.text)}</div>
+    </div>`).join('')}
+    <p style="font-size:12px;color:#8A958D;border-top:1px solid #DBDFD7;padding-top:12px">
+      没事的日子不会发这封信。<br>
+      <a href="https://wwsedisonwws.github.io/Personal/">打开出租房管理</a>
+    </p>
+  </div>`;
+}
+
+// 出租房提醒 · Supabase Edge Function
+//
+// 两个入口，共用同一套规则（rules.ts）：
+//   GET ?mode=ics&token=…      iPhone 日历订阅，返回 ICS
+//   GET ?mode=notify&token=…   GitHub Actions 每天调一次，有事才发邮件
+//
+// 为什么要有这个函数，而不是把 .ics 放 GitHub Pages：
+//   Pages 上的文件是公开的，日历里带房客姓名等于公开。这里用 URL 里的随机 token 挡住，
+//   token 存在 Supabase 的 Secrets 里，不进仓库。
+//
+// 部署注意：**这个函数要关掉 Verify JWT** —— iPhone 日历发不了 Authorization 头。
+// 鉴权改由下面的 token 比对负责。
+//
+// 需要的 Secrets（Supabase 后台 → Edge Functions → Secrets）：
+//   FEED_TOKEN        自己定的随机串，出现在订阅网址里
+//   RESEND_API_KEY    resend.com 的 key，只有发邮件用得上
+//   NOTIFY_TO         收件邮箱
+// SUPABASE_URL 与 SUPABASE_SERVICE_ROLE_KEY 由平台自动注入，不必自己加。
+
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+const TABLES = ['properties', 'rooms', 'tenancies', 'payments', 'aircon_charges', 'short_stays', 'viewings'];
+
+async function loadDB(): Promise<DB> {
+  // service_role 绕过 RLS。这个 key 只存在于 Supabase 内部，不进仓库也不进 GitHub。
+  const sb = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+  );
+  const res = await Promise.all(TABLES.map(t => sb.from(t).select('*')));
+  const bad = res.find(r => r.error);
+  if (bad) throw new Error(bad.error!.message);
+  const [properties, rooms, tenancies, payments, aircon, stays, viewings] = res.map(r => r.data ?? []);
+  return { properties, rooms, tenancies, payments, aircon, stays, viewings };
+}
+
+// 用马来西亚时间判断「今天」。用 UTC 会让早上八点的提醒算成前一天。
+function todayMY() {
+  return new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
+}
+
+Deno.serve(async req => {
+  const url = new URL(req.url);
+  const token = url.searchParams.get('token') ?? '';
+  const expected = Deno.env.get('FEED_TOKEN') ?? '';
+  // 长度相同才逐字比，避免把 token 长度也漏出去
+  if (!expected || token.length !== expected.length || token !== expected) {
+    return new Response('Not found', { status: 404 });
+  }
+
+  const today = todayMY();
+  let db: DB;
+  try {
+    db = await loadDB();
+  } catch (e) {
+    // Deno 的 TS 是严格模式，catch 的 e 是 unknown，不能直接读 .message
+    return new Response(
+      `读取数据失败：${e instanceof Error ? e.message : String(e)}`, { status: 500 });
+  }
+
+  if (url.searchParams.get('mode') === 'ics') {
+    return new Response(toICS(events(db, today, 365)), {
+      headers: {
+        'content-type': 'text/calendar; charset=utf-8',
+        'cache-control': 'max-age=3600',
+      },
+    });
+  }
+
+  // ---- notify ----
+  const items = digest(db, today);
+  // 没事就不发。每天一封「今天没事」会很快训练出无视邮件的习惯，
+  // 到真有事那天也不会看。
+  if (!items.length) return new Response(null, { status: 204 });
+
+  const key = Deno.env.get('RESEND_API_KEY');
+  const to = Deno.env.get('NOTIFY_TO');
+  if (!key || !to) {
+    return new Response(`有 ${items.length} 件事，但没设 RESEND_API_KEY / NOTIFY_TO`, { status: 500 });
+  }
+
+  const urgent = items.filter(i => i.tag === '逾期' || i.tag === '招租').length;
+  const r = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      from: 'onboarding@resend.dev',
+      to: [to],
+      subject: `出租房 · ${items.length} 件事${urgent ? `（${urgent} 件要紧）` : ''}`,
+      html: toEmail(items, today),
+    }),
+  });
+  if (!r.ok) return new Response(`发信失败：${await r.text()}`, { status: 502 });
+
+  return new Response(JSON.stringify({ sent: items.length, today }), {
+    headers: { 'content-type': 'application/json' },
+  });
+});
