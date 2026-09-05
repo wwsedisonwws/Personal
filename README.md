@@ -259,8 +259,10 @@ git commit && git push # 几十秒后生效
 - [x] ~~提醒~~ —— iPhone 日历订阅 + 每日邮件都已设好并验证。
 - [ ] 补房客电话。现在全是空的，填了才能用 WhatsApp 催租。
 - [ ] 更新两个支付宝的余额，押金覆盖率才准。账户名、币种、备注都能在「账户」页直接改。
-- [ ] 点一次「下载备份」，存进 iCloud。现在数据库那份是唯一一份。
-- [ ] 建试验站（见上面「试验站」一节）—— 要开第二个 Supabase 项目，只有你能开。
+- [x] ~~建试验站~~ —— 2026-09-05 建好并验过。试验站是项目 `jufpoofvpwwiqxkqlpyu`，
+      生产是 `jqtirkwynqlwwwtktmat`。**隔离已实测**：在试验站改数据，生产站没变。
+- [x] ~~点一次下载备份~~ —— 已下载，并且在试验站成功恢复过，所以这份备份是**验证过能用的**。
+      不是一劳永逸：改过资料要再点，超过 45 天账户页会变橙提醒。
 - [x] ~~处理历史欠租~~ —— 已在网站上逐间打勾清掉。
 
 ## 文件
@@ -274,6 +276,7 @@ lab/                            试验站：同样三个文件 + 自己的 confi
 tools/sync-lab.sh               生产 → 试验，开始改之前跑
 tools/publish.sh                试验 → 生产，试好了上线
 tools/bump.sh                   换 ?v= 版本号，破 iPhone 缓存
+tools/check-config.js           验两个站不是同一个项目、key 是 anon 不是 service_role
 supabase/schema.sql             建表 + RLS，可重复跑（改过表结构后要重跑一次）
 supabase/seed.sql               初始数据（gitignore，不进仓库）
 supabase/functions/agenda/      提醒用的 Edge Function（ICS 日历 + 邮件摘要）
