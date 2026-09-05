@@ -1264,7 +1264,7 @@ function viewRoomDetail() {
 
   <div class="card">
     <h2>招租价 <span class="sub">这间房现在开价多少</span></h2>
-    <form id="ref-rent-form" class="form" data-room="${room.id}">
+    <form id="ref-rent-form" class="form">
       <div class="field">
         <label for="rr">月租 (RM)</label>
         <input type="number" id="rr" step="50" value="${room.reference_rent ?? ''}"
@@ -1382,7 +1382,7 @@ function newTenantFormHTML(room, mode) {
       这间房现在还有人住。合约开始前它算「已预订」：押金计入你手上的钱、
       未来收入推算也算数，但不影响本月收租。上一位标记搬走时会自动转为在住。
     </p>` : ''}
-    <form class="form tenancy-new" data-room="${room.id}" data-status="${booking ? 'booked' : 'active'}">
+    <form class="form tenancy-new" data-status="${booking ? 'booked' : 'active'}">
       ${tenancyFields({ contract_start: booking ? '' : todayISO(),
                         monthly_rent: num(room.reference_rent) || '' })}
       <div class="actions wide"><button type="submit" class="primary">${booking ? '登记预订' : '登记'}</button></div>
@@ -2014,8 +2014,11 @@ document.addEventListener('submit', async ev => {
   }
 
   if (f.classList.contains('tenancy-new')) {
+    // room_id 取自 UI.roomId，不挂 data-room：那是点击委托里的导航命令，
+    // 挂上去点提交会先跳转重渲染，表单没提交就被换掉 ——
+    // 「登记新租客」因此一直是死的，从没人发现，因为它不报错。
     await write(() => sb.from('tenancies').insert({
-      room_id: f.dataset.room,
+      room_id: UI.roomId,
       status: f.dataset.status,
       ...readTenancy(f),
     }), f.dataset.status === 'booked' ? '预订已登记' : '已登记');
@@ -2039,10 +2042,13 @@ document.addEventListener('submit', async ev => {
   }
 
   if (f.id === 'ref-rent-form') {
+    // 用 UI.roomId，不在表单上挂 data-room —— data-room 是点击委托里的**导航命令**
+    // （「打开这间房」）。当数据挂上去，点保存会先触发跳转重渲染，
+    // 表单在提交前就被换掉，浏览器报 "form is not connected"，按钮看起来是死的。
     const raw = $('#rr').value.trim();
     await write(() => sb.from('rooms')
       .update({ reference_rent: raw === '' ? null : Number(raw) })
-      .eq('id', f.dataset.room), raw === '' ? '已清空，回到按上一任租金算' : '招租价已保存');
+      .eq('id', UI.roomId), raw === '' ? '已清空，回到按上一任租金算' : '招租价已保存');
     return;
   }
 
