@@ -504,6 +504,17 @@ function render() {
   $('#main').innerHTML = UI.roomId ? viewRoomDetail() : views[UI.tab]();
   window.scrollTo({ top: keep });
   UI.keepScroll = false;
+  // 换页后内容可能变短，浏览器会把 scrollY 夹回去，而那不一定触发 scroll 事件 ——
+  // 所以这里显式刷新一次，不能只靠监听。
+  syncToTop();
+}
+
+/* ---------------------------------------------------------------- 回到顶部 */
+
+// 滚过一屏才出现。用 innerHeight 而不是写死像素：小屏该早点出现，大屏该晚点。
+function syncToTop() {
+  const btn = $('#totop');
+  if (btn) btn.classList.toggle('hide', window.scrollY <= window.innerHeight);
 }
 
 /* ---------------------------------------------------------------- 总览 */
@@ -2023,6 +2034,17 @@ async function start() {
       多半是 <code>schema.sql</code> 还没在 Supabase 里跑过。</div></div>`;
   }
 }
+
+// passive：告诉浏览器这个监听不会 preventDefault，滚动就不用等它，手机上更跟手
+window.addEventListener('scroll', syncToTop, { passive: true });
+
+// 用 ?. 而不是直接绑：index.html 自己没法用 ?v= 破缓存（它就是那个入口地址），
+// 所以手机上有可能拿到旧的 index.html 配新的 app.js。那时 #totop 还不存在，
+// 直接绑会抛错、整个页面起不来 —— 为一个锦上添花的按钮赔掉整个应用不划算。
+$('#totop')?.addEventListener('click', () => {
+  const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  window.scrollTo({ top: 0, behavior: still ? 'auto' : 'smooth' });
+});
 
 $('#logout').addEventListener('click', async () => {
   await sb.auth.signOut();
