@@ -1241,7 +1241,7 @@ function payDialogHTML(t) {
       </div>
       <div class="actions wide">
         <button type="submit" class="primary">保存</button>
-        <button type="button" class="ghost" data-close>取消</button>
+        <button type="button" class="ghost" data-close="1">取消</button>
       </div>
     </form>
   </div>`;
@@ -1311,7 +1311,7 @@ function viewRoomDetail() {
     .sort((a, b) => (b.viewing_on + b.viewing_time).localeCompare(a.viewing_on + a.viewing_time));
 
   return `
-  <div style="margin:6px 0 12px"><button class="linkish" data-back>← 返回</button></div>
+  <div style="margin:6px 0 12px"><button class="linkish" data-back="1">← 返回</button></div>
 
   <div class="card">
     <h2>招租价 <span class="sub">这间房现在开价多少</span></h2>
@@ -1522,7 +1522,7 @@ function backfillHTML(t) {
         <label for="bf-date">把这个日期之前的都标为已收</label>
         <input type="date" id="bf-date" value="${todayISO()}" required>
       </div>
-      <div class="actions"><button type="button" class="danger" data-backfill>补记</button></div>
+      <div class="actions"><button type="button" class="danger" data-backfill="1">补记</button></div>
     </form>
   </div>`;
 }
@@ -1873,6 +1873,10 @@ function armDanger(btn, onConfirm) {
   }, 4000);
 }
 
+// ⚠️ 这些 data-* 属性**必须带值**。写成 `data-back`（没有值）时，
+// el.dataset.back 是空字符串，而下面全是 `if (d.back)` 这样判真假的 ——
+// 空字符串是假的，分支永远不进，按钮点了毫无反应也不报错。
+// 「返回」和对话框的「取消」就这么死了很久。要么带值，要么用 `!== undefined` 判。
 document.addEventListener('click', async ev => {
   const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay],[data-airtick],[data-promote],[data-cancelbook],[data-delacct],[data-fmonth],[data-acmonth],[data-acym],[data-backup],[data-restore],[data-vstatus],[data-delviewing]');
   if (!el) return;
@@ -1967,7 +1971,7 @@ document.addEventListener('click', async ev => {
     return;
   }
 
-  if (d.backfill !== undefined) {
+  if (d.backfill) {
     const form = el.closest('form');
     const t = DB.tenancies.find(x => x.id === form.dataset.id);
     const cutoff = $('#bf-date', form).value;
