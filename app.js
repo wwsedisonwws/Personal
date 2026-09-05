@@ -1134,7 +1134,8 @@ function viewCollect() {
           <div class="sub">${sub}</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex:0 0 auto">
-          ${pay ? `<button class="linkish" data-editpay="${t.id}">改</button>` : ''}
+          ${pay ? `<button class="icon-btn" data-editpay="${t.id}"
+            aria-label="改这笔收款" title="改这笔收款">✏️</button>` : ''}
           <button class="tick ${rs.cls}" data-tick="${t.id}">${rs.key === 'paid' ? '✓ 已收' : '✕ 未收'}</button>
         </div>
       </div>`;

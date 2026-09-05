@@ -117,7 +117,11 @@ button:active { transform: scale(.95); }
 /* ---------------------------------------------------------------- 骨架 */
 #topbar {
   position: sticky; top: 0; z-index: 20;
-  min-height: var(--bar-h);
+  /* height 而不是 min-height：min-height 只保证下限，内容一变多就把顶栏撑高，
+     而分页条的 sticky 偏移仍按 --bar-h 算，两者就错开 ——
+     给「登出」加大可点区那次就是这么把分页条顶到顶栏底下 9px 的。
+     固定高度后，两者永远由同一个数决定。 */
+  height: var(--bar-h);
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 10px 16px;
   background: var(--surface);
@@ -134,6 +138,8 @@ body.lab #topbar {
 body.lab #topbar .title, body.lab #topbar .who, body.lab #topbar .who button { color: var(--ink-on-candy); }
 body.lab #topbar .title::before { content: "🧪 "; }
 #topbar .who { font-size: 12px; color: var(--muted); text-align: right; min-width: 0; }
+/* 顶栏是每页常驻的，高度寸土寸金；登出又极少点，不给它撑高 */
+#topbar .who .linkish { min-height: 0; padding: 0; }
 #topbar .who span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 44vw; }
 
 /* 分页导航：窄屏可横滑，但每个 tab 本身不被裁 */
@@ -243,7 +249,10 @@ main { padding: 6px 16px 80px; max-width: 780px; margin: 0 auto; }
 
 /* ---------------------------------------------------------------- 收租开关 */
 .tick {
+  /* min-height 44：这是收租页每月要按十几次的主按钮，原来只有 40px，
+     低于手指的最小可点尺寸，旁边的图标按钮也是 44，两者对齐才不别扭。 */
   font: inherit; font-size: 13px; font-weight: 700;
+  min-height: 44px; display: inline-flex; align-items: center; justify-content: center;
   padding: 8px 14px; border-radius: 999px; cursor: pointer;
   border: 2px solid var(--border); background: var(--surface-2); color: var(--text-2);
   white-space: nowrap;
@@ -341,6 +350,7 @@ button.ghost {
   font: inherit; font-size: 13.5px; font-weight: 700; color: var(--text-2);
   background: var(--surface-2); border: 2px solid var(--border);
   border-radius: 999px; padding: 9px 16px; cursor: pointer;
+  min-height: 40px; display: inline-flex; align-items: center; justify-content: center;
 }
 button.ghost:hover { color: var(--text); }
 
@@ -359,14 +369,32 @@ button.danger.armed { color: var(--on-bad); background: var(--bad); border-color
   font: inherit; font-size: 12.5px; font-weight: 700;
   color: var(--accent); background: var(--accent-soft);
   border: 2px solid transparent; border-radius: 999px;
-  padding: 5px 12px; cursor: pointer; white-space: nowrap;
+  min-height: 40px; display: inline-flex; align-items: center;
+  padding: 5px 14px; cursor: pointer; white-space: nowrap;
 }
 .go::after { content: " ›"; }
 .go:hover { border-color: var(--accent); }
 
+/* 图标按钮：只有一个图标，没有文字。
+   必须给 aria-label —— 读屏软件和长按提示都靠它，图标本身说明不了「改什么」。
+   44×44 是 Apple 的最小可点尺寸；原来那个「改」是文字链接，
+   实际可点区域比旁边的药丸小一大圈，手指经常戳不中。 */
+.icon-btn {
+  width: 44px; height: 44px; flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 17px; line-height: 1;
+  background: var(--surface-2); color: var(--text-2);
+  border: 2px solid var(--border); border-radius: 999px;
+  cursor: pointer;
+}
+.icon-btn:hover { border-color: var(--accent); }
+
 .linkish {
+  /* 纯文字链接的可点区默认就只有一行字高 ——「删除」量出来 17px，戳十次中三次。
+     加纵向 padding 撑到 32，看上去几乎没变，但按得中了。 */
   font: inherit; font-size: 14px; font-weight: 700; color: var(--accent-strong);
-  background: none; border: none; padding: 0; cursor: pointer; text-decoration: underline;
+  background: none; border: none; padding: 7px 2px; min-height: 32px;
+  cursor: pointer; text-decoration: underline;
   text-decoration-thickness: 2px; text-underline-offset: 3px;
 }
 
