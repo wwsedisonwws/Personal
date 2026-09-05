@@ -728,7 +728,7 @@ function scheduleHTML() {
         ${g.items.map(it => `<div class="sub" style="margin-top:6px">
           <span class="pill ${tone[it.kind]}">${it.kind}</span>
           <b>${esc(it.who)}</b> · ${esc(it.where)}<br>${it.todo}
-          <button class="linkish" data-room="${it.room}" style="font-size:12.5px">看这间</button>
+          <button class="go" data-room="${it.room}">看这间</button>
         </div>`).join('')}
         ${g.deposit > 0 ? `<div class="sub" style="margin-top:6px;color:var(--warn)">
           这天要退押金合计 <b>${rm(g.deposit)}</b>，提前备好钱</div>` : ''}
@@ -744,8 +744,11 @@ function briefing() {
   const out = [];
   // pin=1 的排在同类最后（例如「另有 N 位欠租」这种汇总行，
   // 金额最大但不该盖过具名的那几条）
-  const add = (level, title, detail, money, action, pin) =>
-    out.push({ level, title, detail, money: money || 0, action, pin: pin || 0 });
+  // level 决定排序和限额，tag 决定标签上写什么，tone 决定金额用什么颜色。
+  // 这三件事以前挤在 level 一个字段里，结果「带看」被标成「催收」、
+  // 开价 RM2,000 显示成跟欠款一样的红色 —— 一个是你能赚的，一个是收不回来的。
+  const add = (level, tag, tone, title, detail, money, action, pin) =>
+    out.push({ level, tag, tone, title, detail, money: money || 0, action, pin: pin || 0 });
   const monthOnly = ym => ymLabel(ym).replace(/^\d+年/, '');
 
   // ---- 该催的钱 ----
@@ -756,14 +759,14 @@ function briefing() {
     const room = DB.rooms.find(r => r.id === x.t.room_id);
     const last = x.months[x.months.length - 1];
     const late = daysBetween(dueDateOf(x.t, last), todayISO());
-    add('urgent', `催 ${x.t.tenant_name} 收租`,
+    add('urgent', '催收', 'owed', `催 ${x.t.tenant_name} 收租`,
       `${room?.name || ''} · 欠 ${x.months.length} 个月（${ymLabel(x.months[0])} 起）` +
       (late > 0 ? ` · 最近一笔逾期 ${late} 天` : ''),
       x.amount, { room: x.t.room_id, label: '看这间' });
   }
   if (arrears.length > 3) {
     const rest = arrears.slice(3);
-    add('urgent', `另有 ${rest.length} 位欠租`,
+    add('urgent', '催收', 'owed', `另有 ${rest.length} 位欠租`,
       rest.map(x => esc(x.t.tenant_name)).join('、'),
       rest.reduce((s, x) => s + x.amount, 0), null, 1);
   }
@@ -774,9 +777,17 @@ function briefing() {
     const d = daysUntil(v.viewing_on);
     if (d < 0 || d > 3) continue;
     const room = DB.rooms.find(r => r.id === v.room_id);
-    const when = d === 0 ? '今天' : d === 1 ? '明天' : `${v.viewing_on} ${weekdayOf(v.viewing_on)}`;
-    add('urgent', `${when}${v.viewing_time ? ' ' + v.viewing_time : ''} 带看 ${room?.name || ''}`,
-      `${v.name || '（未留名）'}${v.phone ? ' · ' + v.phone : ''}` +
+    // 标题只放「做什么」，时间和人放到副行 —— 原来把日期、钟点、房名全塞进标题，
+    // 手机上换行断在莫名其妙的地方，而且旁边条目都写「还有 56 天」，
+    // 只有它写整年，看着更乱。日期去掉年份，跟接待日程那张卡对齐。
+    const when = d === 0 ? '今天' : d === 1 ? '明天'
+      : `${v.viewing_on.slice(5)} ${weekdayOf(v.viewing_on)}`;
+    // 标题不再重复「带看」—— 药丸上已经写了。补上房产名：
+    // 两处房产都有名字相近的房间（三楼中房独卫B/S、三楼中房），只写房名认不准。
+    add('urgent', '带看', 'chance',
+      `${propertyOf(v.room_id)?.name || ''} · ${room?.name || ''}`,
+      `${when}${v.viewing_time ? ' ' + v.viewing_time : ''}` +
+      ` · ${v.name || '（未留名）'}${v.phone ? ' · ' + v.phone : ''}` +
       (v.want_from ? ` · 想 ${Number(v.want_from.slice(5, 7))} 月入住` : ''),
       room ? roomRent(room) : 0, { room: v.room_id, label: '看这间' });
   }
@@ -784,11 +795,11 @@ function briefing() {
   // ---- 电费 ----
   const ac = airconStats(billYM());
   if (ac.missing > 0) {
-    add('todo', `录 ${ymLabel(billYM())} 的电费`,
+    add('todo', '电费', 'none', `录 ${ymLabel(billYM())} 的电费`,
       `${ac.missing} 位租客还没填金额，${monthOnly(thisYM())}收`,
       0, { tab: 'collect', label: '去填' });
   } else if (ac.outstanding > 0) {
-    add('urgent', `收 ${ymLabel(billYM())} 电费`,
+    add('urgent', '电费', 'owed', `收 ${ymLabel(billYM())} 电费`,
       `${ac.total - ac.paidCount} 位还没交`,
       ac.outstanding, { tab: 'collect', label: '去打勾' });
   }
@@ -800,7 +811,7 @@ function briefing() {
     if (nextTenancyAfter(room.id, st.tenancy.contract_end.slice(0, 7))) continue;
     const d = daysUntil(st.tenancy.contract_end);
     const looking = openViewings(room.id).length;
-    add('todo', `${room.name} 要找下一位`,
+    add('todo', '招租', 'chance', `${room.name} 要找下一位`,
       `${st.tenancy.tenant_name} ${st.tenancy.contract_end} 到期（还有 ${d} 天）` +
       (looking ? `，已有 ${looking} 组约看` : '，后面没人接'),
       roomRent(room), { room: room.id, label: '看这间' });
@@ -810,7 +821,7 @@ function briefing() {
   const vac = vacancyCalendar(12);
   for (const g of vac.filter(v => v.gap).sort((a, b) => b.money - a.money).slice(0, 3)) {
     const income = g.vacant * dailyRate();
-    add('idea', `${g.room.name} ${ymLabel(g.ym)}空着可做日租`,
+    add('idea', '可优化', 'chance', `${g.room.name} ${ymLabel(g.ym)}空着可做日租`,
       `空 ${vacancySpan(g.ym, g)}（${g.vacant} 天），${esc(g.next.tenant_name)} ${g.next.contract_start} 才来。` +
       `按 ${rm(dailyRate())}/晚约收 ${rm(income)}` +
       (income > g.money ? `，比空着少收的 ${rm(g.money)} 还多` : ''),
@@ -825,7 +836,7 @@ function briefing() {
   const dep = totalDeposits();
   const { rmTotal } = accountsInRM();
   if (dep > 0 && rmTotal < dep) {
-    add('todo', '押金不够退',
+    add('todo', '要办', 'owed', '押金不够退',
       `押金负债 ${rm(dep)}，账户折马币只有 ${rm(rmTotal)}`,
       dep - rmTotal, { tab: 'money', label: '看账户' });
   }
@@ -833,7 +844,7 @@ function briefing() {
   // ---- 汇率 ----
   const imp = impliedRate();
   if (imp && (fxRate() - imp.rate) / fxRate() > 0.03) {
-    add('todo', '设定汇率该更新了',
+    add('todo', '要办', 'none', '设定汇率该更新了',
       `最近 ${imp.n} 笔实际换到 ${imp.rate.toFixed(4)}，设定值还是 ${fxRate()}`,
       0, { tab: 'money', label: '去改' });
   }
@@ -857,32 +868,39 @@ function briefingHTML() {
     return `<div class="card"><h2>本月要做的事</h2>
       <div class="empty">没有待办 —— 租金收齐、电费录好、也没有空房 🎉</div></div>`;
   }
-  const badge = { urgent: ['催收', 'bad'], todo: ['要办', 'warn'], idea: ['可优化', 'flat'] };
+  // 标签的颜色仍按紧急程度（一眼分轻重），但文字按事情种类 —— 两者不是一回事。
+  // 药丸颜色不能只看紧急程度：带看是**紧急但好事**，跟催收同样标红，
+  // 一眼扫过去会误以为又是一笔烂账。红色只留给「钱收不回来」那一类。
+  const pillOf = it => it.level === 'idea' ? 'flat'
+    : it.tone === 'owed' ? 'bad' : 'warn';
   return `<div class="card">
     <h2>本月要做的事 <span class="sub">${all.length} 项${hidden ? `，列出前 ${items.length}` : ''}</span></h2>
     ${items.map(it => {
-      const [txt, cls] = badge[it.level];
+      const cls = pillOf(it);
+      // 小药丸按钮而不是带下划线的文字链接 —— 界面里其他能点的都是药丸，
+      // 只有这里是「网页链接」的样子，格格不入。
       const btn = it.action
         ? (it.action.room
-            ? `<button class="linkish" data-room="${it.action.room}">${it.action.label}</button>`
-            : `<button class="linkish" data-tab="${it.action.tab}">${it.action.label}</button>`)
+            ? `<button class="go" data-room="${it.action.room}">${it.action.label}</button>`
+            : `<button class="go" data-tab="${it.action.tab}">${it.action.label}</button>`)
         : '';
       return `<div class="collect-row">
         <div class="left">
-          <div class="who"><span class="pill ${cls}">${txt}</span> ${esc(it.title)}</div>
+          <div class="who"><span class="pill ${cls}">${esc(it.tag)}</span> ${esc(it.title)}</div>
           ${it.detail ? `<div class="sub">${it.detail}</div>` : ''}
           ${btn ? `<div style="margin-top:6px">${btn}</div>` : ''}
         </div>
         ${it.money ? `<span class="row-rent" style="color:var(--${
-          it.level === 'idea' ? 'accent' : it.level === 'urgent' ? 'bad' : 'warn'})">${rm(it.money)}</span>` : ''}
+          it.tone === 'owed' ? 'bad' : 'accent'})">${rm(it.money)}</span>` : ''}
       </div>`;
     }).join('')}
     ${hidden ? `<div class="hero-sub" style="margin-top:10px">
       另有 ${hidden} 项较次要的没列出来。</div>` : ''}
     <div class="hero-sub" style="margin-top:12px">
-      按紧急程度和金额排的。${mp.overdue > 0
+      按紧急程度和金额排的。<b style="color:var(--bad)">红色</b>是收不回来的钱，
+      <b style="color:var(--accent)">绿色</b>是还能赚的。${mp.overdue > 0
         ? `本月还有 <b style="color:var(--bad)">${rm(mp.overdueAmt)}</b> 逾期没收。`
-        : ''}绿色那几条是能多赚的，不做也不亏。
+        : ''}
     </div>
   </div>`;
 }
@@ -931,7 +949,7 @@ function viewDashboard() {
       mp.overdue > 0 ? ` · <b style="color:var(--bad)">${mp.overdue} 间逾期 ${rm(mp.overdueAmt)}</b>` : ''}${
       mp.waiting > 0 ? ` · ${mp.waiting} 间还没到收租日 ${rm(mp.waitingAmt)}` : ''}${
       mp.outstanding === 0 ? ' · 本月已收齐 🎉' : ''}
-      ${mp.outstanding > 0 ? '<button class="linkish" data-tab="collect" style="margin-left:6px">看是哪几间</button>' : ''}
+      ${mp.outstanding > 0 ? '<button class="go" data-tab="collect" style="margin-left:6px">看是哪几间</button>' : ''}
     </div>
   </div>
 

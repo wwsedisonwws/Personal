@@ -352,6 +352,18 @@ button.danger {
 button.danger:hover { color: var(--bad); border-color: var(--bad); }
 button.danger.armed { color: var(--on-bad); background: var(--bad); border-color: var(--bad); font-weight: 800; }
 
+/* 「看这间 ›」这类跳转。原来用 .linkish（带下划线的绿色文字），
+   是整个界面里唯一长得像「网页链接」的东西 —— 其余能点的全是圆角药丸，
+   混在一起就很跳。做成小药丸，跟 .tick / .ghost 是同一族。 */
+.go {
+  font: inherit; font-size: 12.5px; font-weight: 700;
+  color: var(--accent); background: var(--accent-soft);
+  border: 2px solid transparent; border-radius: 999px;
+  padding: 5px 12px; cursor: pointer; white-space: nowrap;
+}
+.go::after { content: " ›"; }
+.go:hover { border-color: var(--accent); }
+
 .linkish {
   font: inherit; font-size: 14px; font-weight: 700; color: var(--accent-strong);
   background: none; border: none; padding: 0; cursor: pointer; text-decoration: underline;
