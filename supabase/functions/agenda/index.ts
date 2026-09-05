@@ -20,7 +20,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { DB, digest, events, toEmail, toICS } from './rules.ts';
 
-const TABLES = ['properties', 'rooms', 'tenancies', 'payments', 'aircon_charges', 'short_stays'];
+const TABLES = ['properties', 'rooms', 'tenancies', 'payments', 'aircon_charges', 'short_stays', 'viewings'];
 
 async function loadDB(): Promise<DB> {
   // service_role 绕过 RLS。这个 key 只存在于 Supabase 内部，不进仓库也不进 GitHub。
@@ -31,8 +31,8 @@ async function loadDB(): Promise<DB> {
   const res = await Promise.all(TABLES.map(t => sb.from(t).select('*')));
   const bad = res.find(r => r.error);
   if (bad) throw new Error(bad.error!.message);
-  const [properties, rooms, tenancies, payments, aircon, stays] = res.map(r => r.data ?? []);
-  return { properties, rooms, tenancies, payments, aircon, stays };
+  const [properties, rooms, tenancies, payments, aircon, stays, viewings] = res.map(r => r.data ?? []);
+  return { properties, rooms, tenancies, payments, aircon, stays, viewings };
 }
 
 // 用马来西亚时间判断「今天」。用 UTC 会让早上八点的提醒算成前一天。

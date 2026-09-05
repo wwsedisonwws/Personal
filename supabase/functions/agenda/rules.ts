@@ -11,7 +11,7 @@
 export type Row = Record<string, any>;
 export interface DB {
   properties: Row[]; rooms: Row[]; tenancies: Row[];
-  payments: Row[]; aircon: Row[]; stays: Row[];
+  payments: Row[]; aircon: Row[]; stays: Row[]; viewings: Row[];
 }
 
 /* ---------------------------------------------------------------- 日期 */
@@ -76,6 +76,11 @@ export interface Ev {
   date: string; kind: string; who: string; where: string; todo: string; uid: string;
 }
 
+// 还在谈的看房预约。跟 app.js 的 openViewings 是同一条规则 ——
+// 这是第二份实现，改一处就要改另一处，测试会逐条对账。
+export const openViewings = (db: DB, roomId: string) =>
+  db.viewings.filter(v => v.room_id === roomId && (v.status === 'pending' || v.status === 'done'));
+
 export function events(db: DB, today: string, days = 180): Ev[] {
   const until = addDays(today, days);
   const out: Ev[] = [];
@@ -98,15 +103,30 @@ export function events(db: DB, today: string, days = 180): Ev[] {
     }
     if (t.contract_end >= today && t.contract_end <= until) {
       const s = successorOf(db, t);
-      const tail = !s ? ' · 后面没人接，要招租'
-        : s.kind === 'covering' ? ` · 房间由 ${s.who.tenant_name} 接着住`
-        : ` · 下一位 ${s.who.tenant_name} ${s.who.contract_start} 才来`;
+      const looking = openViewings(db, t.room_id).length;
+      const tail = s
+        ? (s.kind === 'covering' ? ` · 房间由 ${s.who.tenant_name} 接着住`
+                                 : ` · 下一位 ${s.who.tenant_name} ${s.who.contract_start} 才来`)
+        : looking ? ` · 后面没人接，已有 ${looking} 组约看`
+        : ' · 后面没人接，要招租';
       out.push({
         date: t.contract_end, kind: '退房', who: t.tenant_name, where: where(t.room_id),
         todo: `验房、退押金 ${rm(t.deposit)}` + tail,
         uid: `out-${t.id}-${t.contract_end}`,
       });
     }
+  }
+
+  for (const v of db.viewings) {
+    if (v.status !== 'pending') continue;
+    if (v.viewing_on < today || v.viewing_on > until) continue;
+    out.push({
+      date: v.viewing_on, kind: '看房', who: v.name || '（未留名）', where: where(v.room_id),
+      todo: [v.viewing_time && `${v.viewing_time} 到`,
+             v.want_from && `想 ${Number(v.want_from.slice(5, 7))} 月入住`,
+             v.phone && `电话 ${v.phone}`].filter(Boolean).join(' · ') || '带看',
+      uid: `view-${v.id}`,
+    });
   }
 
   for (const s of db.stays) {
@@ -188,7 +208,9 @@ export function digest(db: DB, today: string): Item[] {
     out.push({
       tag: '招租',
       text: `${roomName(t.room_id)} 还有 ${left} 天到期（${t.contract_end}，${t.tenant_name}），` +
-        `后面没人接。空一个月少收 ${rm(t.monthly_rent)}。`,
+        (openViewings(db, t.room_id).length
+          ? `已有 ${openViewings(db, t.room_id).length} 组约看，跟进一下。`
+          : `后面没人接。空一个月少收 ${rm(t.monthly_rent)}。`),
     });
   }
 

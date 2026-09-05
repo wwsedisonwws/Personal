@@ -56,7 +56,7 @@ const IS_LAB = !!(window.SUPABASE_CONFIG || {}).isLab;
 
 const DB = {
   properties: [], rooms: [], tenancies: [], payments: [],
-  accounts: [], stays: [], aircon: [], settings: null,
+  accounts: [], stays: [], aircon: [], viewings: [], settings: null,
 };
 
 const UI = {
@@ -85,13 +85,13 @@ function toast(msg, kind = '') {
 
 async function loadAll() {
   const tables = ['properties', 'rooms', 'tenancies', 'payments', 'accounts',
-                  'short_stays', 'aircon_charges', 'app_settings'];
+                  'short_stays', 'aircon_charges', 'viewings', 'app_settings'];
   const results = await Promise.all(tables.map(t => sb.from(t).select('*')));
 
   const failed = results.find(r => r.error);
   if (failed) throw failed.error;
 
-  const [props, rooms, ten, pay, acc, stays, aircon, settings] = results.map(r => r.data || []);
+  const [props, rooms, ten, pay, acc, stays, aircon, viewings, settings] = results.map(r => r.data || []);
   DB.properties = props.sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
   DB.rooms = rooms.sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
   DB.tenancies = ten;
@@ -99,6 +99,8 @@ async function loadAll() {
   DB.accounts = acc.sort((a, b) => a.sort_order - b.sort_order);
   DB.stays = stays.sort((a, b) => b.check_in.localeCompare(a.check_in));
   DB.aircon = aircon;
+  DB.viewings = viewings.sort((a, b) =>
+    (a.viewing_on + a.viewing_time).localeCompare(b.viewing_on + b.viewing_time));
   DB.settings = settings[0] || null;
 
   if (!DB.settings) {
@@ -137,6 +139,7 @@ const BACKUP_TABLES = [
   ['payments',       'payments'],
   ['aircon_charges', 'aircon'],
   ['short_stays',    'stays'],
+  ['viewings',       'viewings'],
 ];
 
 // 只导出 DB 里已经加载好的那份，不必再查一次库。
@@ -326,13 +329,25 @@ function vacancySpan(ym, v) {
 }
 
 // 这间房该按多少钱估算损失：在住 → 已预订 → 最近一位住过的 → 参考租金
+// 这间房「出租能值多少」。只用在一处：算空置期少收多少 ——
+// 也就是问的永远是「空着的时候本该收多少」。
+//
+// 招租价排第一：那是房东明确写下的答案，其余两个都是从租约推断的。
+// 原来的顺序把它排在最后，只要房间有过租客就永远轮不到 —— 涨了价，
+// 系统还按老价算空置损失。这间房上一任 1800、现在开价 2000，
+// 空一个月就少报 200。
 function roomRent(room) {
+  if (num(room.reference_rent)) return num(room.reference_rent);
   const t = activeTenancy(room.id) || bookedTenancy(room.id);
   if (t) return num(t.monthly_rent);
   const past = DB.tenancies.filter(x => x.room_id === room.id)
     .sort((a, b) => b.contract_end.localeCompare(a.contract_end))[0];
-  return num(past?.monthly_rent) || num(room.reference_rent);
+  return num(past?.monthly_rent);
 }
+
+// 某间房还没谈成的看房预约（pending/done 都算「还在谈」）
+const openViewings = roomId => DB.viewings.filter(v =>
+  v.room_id === roomId && (v.status === 'pending' || v.status === 'done'));
 
 // 这间房在这个月之后还有没有租客要来。
 // 比的是月初而不是月末 —— 租客B 10/15 入住，十月前半空着同样算「后面有人」，
@@ -553,8 +568,10 @@ function schedule(days = 90) {
       const covering = others.find(x => x.contract_start <= after && x.contract_end >= after);
       const upcoming = others.filter(x => x.contract_start > after)
         .sort((a, b) => a.contract_start.localeCompare(b.contract_start))[0];
+      const looking = openViewings(t.room_id).length;
       const succ = covering ? ` · 房间由 ${esc(covering.tenant_name)} 接着住`
         : upcoming ? ` · 下一位 ${esc(upcoming.tenant_name)} ${upcoming.contract_start} 才来`
+        : looking ? ` · 后面没人接，已有 ${looking} 组约看`
         : ' · 后面没人接，要招租';
       ev.push({ date: t.contract_end, kind: '退房', who: t.tenant_name, where: where(t.room_id),
         todo: `验房、退押金 ${rm(t.deposit)}` + succ,
@@ -574,6 +591,20 @@ function schedule(days = 90) {
     }
   }
 
+  for (const v of DB.viewings) {
+    if (v.status !== 'pending') continue;          // 看过了就不用再提醒去接待
+    if (v.viewing_on < todayISO() || v.viewing_on > until) continue;
+    const room = DB.rooms.find(r => r.id === v.room_id);
+    const ask = room ? roomRent(room) : 0;
+    ev.push({
+      date: v.viewing_on, kind: '看房', who: v.name || '（未留名）', where: where(v.room_id),
+      todo: [v.viewing_time && `${v.viewing_time} 到`, ask && `开价 ${rm(ask)}`,
+             v.want_from && `想 ${Number(v.want_from.slice(5, 7))} 月入住`,
+             v.phone && `电话 ${v.phone}`].filter(Boolean).join(' · '),
+      room: v.room_id, time: v.viewing_time,
+    });
+  }
+
   // 按日期分组 —— 同一天有好几件事正是最该看见的（9/9 两拨人、10/31 三人同退）
   const byDate = {};
   for (const e of ev.sort((a, b) => a.date.localeCompare(b.date))) (byDate[e.date] ||= []).push(e);
@@ -581,6 +612,67 @@ function schedule(days = 90) {
     date, items, days: daysUntil(date),
     deposit: items.reduce((s, x) => s + (x.kind === '退房' ? x.money : 0), 0),
   }));
+}
+
+// 看房预约卡。录入表单就放在卡里 —— 电话里约完随手记，多点两下就懒得记了，
+// 而没记下来的约等于没约。
+const VIEW_STATUS = { pending: '约了', done: '看过了', rented: '租了', passed: '不租了' };
+
+function viewingsHTML() {
+  const open = DB.viewings.filter(v => v.status === 'pending' || v.status === 'done')
+    .sort((a, b) => (a.viewing_on + a.viewing_time).localeCompare(b.viewing_on + b.viewing_time));
+  const rentable = DB.rooms.filter(r => !r.self_occupied);
+  const today = todayISO();
+
+  return `
+  <div class="card">
+    <h2>看房预约 <span class="sub">${open.length ? `${open.length} 组在谈` : '暂时没有'}</span></h2>
+    ${open.length ? open.map(v => {
+      const room = DB.rooms.find(r => r.id === v.room_id);
+      const p = propertyOf(v.room_id);
+      const d = daysUntil(v.viewing_on);
+      const late = v.status === 'pending' && v.viewing_on < today;
+      return `<div class="collect-row">
+        <div class="left">
+          <div class="who">${esc(v.name || '（未留名）')}
+            <span class="pill ${late ? 'bad' : d <= 3 ? 'warn' : 'flat'} plain" style="margin-left:6px">
+              ${v.viewing_on.slice(5)} ${weekdayOf(v.viewing_on)}${v.viewing_time ? ' ' + v.viewing_time : ''}</span></div>
+          <div class="sub">${esc(p?.name || '')} · ${esc(room?.name || '（已删除）')}
+            ${room ? ' · 开价 ' + rm(roomRent(room)) : ''}
+            ${v.want_from ? ` · 想 ${Number(v.want_from.slice(5, 7))} 月入住` : ''}
+            ${v.phone ? ` · ${esc(v.phone)}` : ''}
+            ${late ? ' · <b>日子过了，还没记结果</b>' : ''}</div>
+          ${v.note ? `<div class="sub">${esc(v.note)}</div>` : ''}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+          ${v.status === 'pending'
+            ? `<button class="tick" data-vstatus="${v.id}:done">看过了</button>`
+            : `<button class="tick on" data-vstatus="${v.id}:rented">租了</button>`}
+          <button class="ghost" data-vstatus="${v.id}:passed" style="font-size:12px;padding:6px 11px">不租了</button>
+          <button class="linkish" data-delviewing="${v.id}" style="font-size:11px;color:var(--muted)">删除</button>
+        </div>
+      </div>`;
+    }).join('') : '<div class="empty">还没有人约看房。电话里约好了就记在这里，会进接待日程和 iPhone 日历。</div>'}
+
+    <form id="viewing-form" class="form" style="margin-top:16px;border-top:2px dotted var(--border);padding-top:16px">
+      <div class="field wide"><label for="v-room">新增预约 · 哪间房</label>
+        <select id="v-room" required>${rentable.map(r =>
+          `<option value="${r.id}">${esc(propertyOf(r.id)?.name || '')} · ${esc(r.name)}</option>`).join('')}</select></div>
+      <div class="field"><label for="v-on">看房日期</label>
+        <input type="date" id="v-on" required value="${today}"></div>
+      <div class="field"><label for="v-time">时间</label>
+        <input type="time" id="v-time" value="14:00"></div>
+      <div class="field"><label for="v-name">姓名（可留空）</label>
+        <input type="text" id="v-name" placeholder="没问到就空着"></div>
+      <div class="field"><label for="v-phone">电话</label>
+        <input type="tel" id="v-phone" inputmode="tel"></div>
+      <div class="field"><label for="v-from">想几时入住</label>
+        <input type="date" id="v-from"></div>
+      <div class="field"><label for="v-note">备注</label>
+        <input type="text" id="v-note" placeholder="谈的价钱、特别要求…"></div>
+      <div class="actions wide"><button type="submit" class="primary">记下来</button></div>
+    </form>
+  </div>`;
 }
 
 function scheduleHTML() {
@@ -643,6 +735,19 @@ function briefing() {
       rest.reduce((s, x) => s + x.amount, 0), null, 1);
   }
 
+  // ---- 看房预约 ----
+  // 放在催收之后但同为 urgent：约错过了这个人就走了，租金晚几天还能追。
+  for (const v of DB.viewings.filter(x => x.status === 'pending')) {
+    const d = daysUntil(v.viewing_on);
+    if (d < 0 || d > 3) continue;
+    const room = DB.rooms.find(r => r.id === v.room_id);
+    const when = d === 0 ? '今天' : d === 1 ? '明天' : `${v.viewing_on} ${weekdayOf(v.viewing_on)}`;
+    add('urgent', `${when}${v.viewing_time ? ' ' + v.viewing_time : ''} 带看 ${room?.name || ''}`,
+      `${v.name || '（未留名）'}${v.phone ? ' · ' + v.phone : ''}` +
+      (v.want_from ? ` · 想 ${Number(v.want_from.slice(5, 7))} 月入住` : ''),
+      room ? roomRent(room) : 0, { room: v.room_id, label: '看这间' });
+  }
+
   // ---- 电费 ----
   const ac = airconStats(billYM());
   if (ac.missing > 0) {
@@ -661,9 +766,11 @@ function briefing() {
     if (!['soon', 'urgent'].includes(st.key)) continue;
     if (nextTenancyAfter(room.id, st.tenancy.contract_end.slice(0, 7))) continue;
     const d = daysUntil(st.tenancy.contract_end);
+    const looking = openViewings(room.id).length;
     add('todo', `${room.name} 要找下一位`,
-      `${st.tenancy.tenant_name} ${st.tenancy.contract_end} 到期（还有 ${d} 天），后面没人接`,
-      num(st.tenancy.monthly_rent), { room: room.id, label: '看这间' });
+      `${st.tenancy.tenant_name} ${st.tenancy.contract_end} 到期（还有 ${d} 天）` +
+      (looking ? `，已有 ${looking} 组约看` : '，后面没人接'),
+      roomRent(room), { room: room.id, label: '看这间' });
   }
 
   // ---- 空档拿来做日租 ----
@@ -797,6 +904,7 @@ function viewDashboard() {
 
   ${briefingHTML()}
 
+  ${viewingsHTML()}
   ${scheduleHTML()}
 
   <div class="card">
@@ -1148,8 +1256,34 @@ function viewRoomDetail() {
     .filter(x => x.room_id === room.id && x.status === 'ended')
     .sort((a, b) => b.contract_end.localeCompare(a.contract_end));
 
+  const vs = DB.viewings.filter(v => v.room_id === room.id)
+    .sort((a, b) => (b.viewing_on + b.viewing_time).localeCompare(a.viewing_on + a.viewing_time));
+
   return `
   <div style="margin:6px 0 12px"><button class="linkish" data-back>← 返回</button></div>
+
+  <div class="card">
+    <h2>招租价 <span class="sub">这间房现在开价多少</span></h2>
+    <form id="ref-rent-form" class="form" data-room="${room.id}">
+      <div class="field">
+        <label for="rr">月租 (RM)</label>
+        <input type="number" id="rr" step="50" value="${room.reference_rent ?? ''}"
+               placeholder="${roomRent(room) || '还没定'}">
+        <div class="hint">空着时按这个价算「少收多少」。留空就沿用上一任的租金。</div>
+      </div>
+      <div class="actions wide"><button type="submit" class="primary">保存</button></div>
+    </form>
+    ${vs.length ? `<div style="border-top:2px dotted var(--border);margin-top:16px;padding-top:14px">
+      <h2 style="font-size:14px;margin:0 0 8px">看房记录 <span class="sub">${vs.length} 条</span></h2>
+      ${vs.map(v => `<div class="row-meta" style="margin-top:6px">
+        <span class="pill ${v.status === 'rented' ? 'good' : v.status === 'passed' ? 'flat' : 'warn'} plain">
+          ${VIEW_STATUS[v.status]}</span>
+        <span>${v.viewing_on} ${esc(v.viewing_time)}</span>
+        <span>${esc(v.name || '（未留名）')}</span>
+        ${v.note ? `<span class="muted">${esc(v.note)}</span>` : ''}
+      </div>`).join('')}
+    </div>` : ''}
+  </div>
 
   <div class="card">
     <h2>${esc(p?.name || '')} · ${esc(room.name)}
@@ -1689,10 +1823,22 @@ function armDanger(btn, onConfirm) {
 }
 
 document.addEventListener('click', async ev => {
-  const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay],[data-airtick],[data-promote],[data-cancelbook],[data-delacct],[data-fmonth],[data-acmonth],[data-acym],[data-backup],[data-restore]');
+  const el = ev.target.closest('[data-tab],[data-room],[data-back],[data-tick],[data-editpay],[data-close],[data-mo],[data-year],[data-backfill],[data-moveout],[data-delroom],[data-staypaid],[data-delstay],[data-airtick],[data-promote],[data-cancelbook],[data-delacct],[data-fmonth],[data-acmonth],[data-acym],[data-backup],[data-restore],[data-vstatus],[data-delviewing]');
   if (!el) return;
   const d = el.dataset;
 
+  if (d.vstatus) {
+    const [id, status] = d.vstatus.split(':');
+    // 标成「租了」不自动建租约：签没签、押金多少、几号起租都得他自己填。
+    // 凭一条看房记录猜出一份合约，比不建危险得多。
+    await write(() => sb.from('viewings').update({ status }).eq('id', id),
+      status === 'rented' ? '已标记租了 —— 记得去那间房建租约' : '已更新');
+    return;
+  }
+  if (d.delviewing) {
+    armDanger(el, () => write(() => sb.from('viewings').delete().eq('id', d.delviewing), '预约已删除'));
+    return;
+  }
   if (d.backup) { downloadBackup(); return; }
   if (d.restore) {
     const file = $('#restore-file')?.files?.[0];
@@ -1889,6 +2035,27 @@ document.addEventListener('submit', async ev => {
       note: $('#p-note').value.trim(),
     };
     await write(() => sb.from('payments').upsert(row, { onConflict: 'tenancy_id,ym' }), '已保存');
+    return;
+  }
+
+  if (f.id === 'ref-rent-form') {
+    const raw = $('#rr').value.trim();
+    await write(() => sb.from('rooms')
+      .update({ reference_rent: raw === '' ? null : Number(raw) })
+      .eq('id', f.dataset.room), raw === '' ? '已清空，回到按上一任租金算' : '招租价已保存');
+    return;
+  }
+
+  if (f.id === 'viewing-form') {
+    await write(() => sb.from('viewings').insert({
+      room_id: $('#v-room').value,
+      viewing_on: $('#v-on').value,
+      viewing_time: $('#v-time').value || '',
+      name: $('#v-name').value.trim(),
+      phone: $('#v-phone').value.trim(),
+      want_from: $('#v-from').value || null,
+      note: $('#v-note').value.trim(),
+    }), '预约已记下');
     return;
   }
 

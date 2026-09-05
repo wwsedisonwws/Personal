@@ -166,6 +166,33 @@ create table if not exists public.short_stays (
   constraint stay_dates_ordered check (check_out > check_in)
 );
 
+-- ---------------------------------------------------------------- 看房预约
+-- 有人约来看房，还没签。**不能借用 tenancies(status='booked') 来记** ——
+-- 那是已签的合约，会被算进未来收入推算和「押金在手」。把一个还没谈成的意向
+-- 当成钱记进去，报表就开始骗人。
+--
+-- 日期和时间分开存、都用本地墙上时间：全项目的日期逻辑都刻意避开了
+-- toISOString（马来西亚 UTC+8，用 UTC 会整体差一天）。存 timestamptz
+-- 就得重新引入时区换算，为一个「下午两点」不值得。
+create table if not exists public.viewings (
+  id           uuid primary key default gen_random_uuid(),
+  owner_id     uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  room_id      uuid not null references public.rooms(id) on delete cascade,
+  name         text not null default '',      -- 可能就是「有人」，不强制填
+  phone        text not null default '',
+  viewing_on   date not null,
+  viewing_time text not null default '' check (viewing_time ~ '^([01]\d|2[0-3]):[0-5]\d$|^$'),
+  want_from    date,                          -- 想几时入住
+  -- pending 约了还没来 / done 看过了还没定 / rented 租了 / passed 不租了
+  status       text not null default 'pending'
+    check (status in ('pending','done','rented','passed')),
+  note         text not null default '',
+  created_at   timestamptz not null default now()
+);
+
+create index if not exists viewings_room_idx on public.viewings(room_id);
+create index if not exists viewings_date_idx on public.viewings(viewing_on);
+
 -- ---------------------------------------------------------------- 索引
 create index if not exists rooms_property_idx      on public.rooms(property_id);
 create index if not exists tenancies_room_idx      on public.tenancies(room_id);
@@ -186,6 +213,7 @@ alter table public.accounts     enable row level security;
 alter table public.app_settings enable row level security;
 alter table public.short_stays  enable row level security;
 alter table public.aircon_charges enable row level security;
+alter table public.viewings     enable row level security;
 
 -- 所有表策略相同：只能碰自己的行。
 -- using 管读取/更新前的可见性，with check 管写入后的值 —— 两个都要，
@@ -195,7 +223,7 @@ declare t text;
 begin
   foreach t in array array[
     'properties','rooms','tenancies','payments','accounts','app_settings',
-    'short_stays','aircon_charges'
+    'short_stays','aircon_charges','viewings'
   ] loop
     execute format('drop policy if exists own_rows_select on public.%I', t);
     execute format('drop policy if exists own_rows_insert on public.%I', t);
