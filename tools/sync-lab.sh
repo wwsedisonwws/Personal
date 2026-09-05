@@ -5,6 +5,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# 先验两个 config：填成同一个项目的话界面上看不出区别，
+# 但在试验站按「清空并恢复」删的就是真数据。
+node tools/check-config.js
+
 cp index.html app.js styles.css lab/
 "$(dirname "$0")/bump.sh" lab/index.html
 echo "✅ 试验站已同步到生产站的当前版本（lab/config.js 未动）"

@@ -5,6 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# 上线前验一次两个 config，两个站连成同一个项目就别推了。
+node tools/check-config.js
+
 cp lab/index.html lab/app.js lab/styles.css .
 "$(dirname "$0")/bump.sh" index.html
 echo "✅ 已上线。接着 git commit + push，几十秒后 GitHub Pages 生效。"
