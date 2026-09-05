@@ -15,7 +15,8 @@ Bayan + Perling 两处房产、11 间房的租务管理网站。
 |---|---|
 | **总览** | 本月要做的事、接待日程（几号签合同/退押金）、收租进度、满租月收入、押金在手、空档与待出租、到期预警 |
 | **收租** | 一屏打勾收租；按各自的收租日区分「没到日子」和「逾期」；空调费逐个填金额单独打勾，可往回补录以前的月份 |
-| **房间** | 房客资料、押金、合约起止、每月几号收租、WhatsApp 一键催租、收租月历、批量补记 |
+| **房间** | 房客资料、押金、合约起止、每月几号收租、招租价、WhatsApp 一键催租、收租月历、批量补记 |
+| **看房** | 谁几号几点来看哪间房、想几时入住；看过了/租了/不租了三个状态；已结束的留档 |
 | **日租** | RM90/晚，哪间空用哪间，自动检查跟月租合约撞期 |
 | **账户** | 支付宝余额（可增删改名）、押金能不能兑付、未来 12 个月收入推算（可点开看逐间明细）、过去实收、空调费历史 |
 
@@ -33,6 +34,11 @@ Bayan + Perling 两处房产、11 间房的租务管理网站。
   为压低漂移风险：函数里只放提醒真正要用的最窄一组规则（入住退房、收租日、
   电费月份、到期招租），空档/汇率/押金覆盖一概不搬；且测试会把两边的事件
   **逐条双向比对**，对不上就算失败。改规则时两处都要改。
+- **只有看房是定时日历事件，其余都是全天**。入住、退房、合约到期本来就按天算，
+  全天正确。但看房是「下午两点到 Perling」—— 做成全天会堆在 iPhone 日历当天顶部，
+  界面上根本看不到钟点，提醒也只在系统默认时刻响。定时事件用 UTC 写
+  （马来西亚固定 UTC+8、从不用夏令时，减 8 小时永远准确），
+  省掉 TZID 要配的那段 VTIMEZONE —— 少了它有些客户端会解错。
 - **接待日程按日子排，同一天的并在一起**。其他卡都是按房间或按月组织的，
   合约到期卡只说「还有 51 天」，不会告诉你那天还有别人同时退房。
   10/31 三人同退、一次要备 RM12,000 押金，只有按日子排才看得出来。
@@ -134,7 +140,7 @@ Supabase 免费版**闲置 7 天会暂停项目**。收租是月度动作，中�
 
 | 入口 | 谁来调 | 作用 |
 |---|---|---|
-| `?mode=ics&token=…` | iPhone 日历（订阅后自动拉） | 入住/退房/日租进出变成日历事件，提前一天响 |
+| `?mode=ics&token=…` | iPhone 日历（订阅后自动拉） | 入住/退房/日租进出 → 全天事件，提前一天响；**看房 → 定时事件**（落在当天那个钟点上），提前一天 + 出门前一小时各响一次 |
 | `?mode=notify&token=…` | GitHub Actions 每天一次 | **有事才**发邮件；没事返回 204 不发信 |
 
 > **为什么不把 .ics 直接放 GitHub Pages**：Pages 上的文件是公开的，
@@ -145,7 +151,14 @@ Supabase 免费版**闲置 7 天会暂停项目**。收租是月度动作，中�
 1. **注册 [resend.com](https://resend.com)**（免费）。寄给自己 Gmail 用
    `onboarding@resend.dev` 当寄件人即可，不必验证域名。拿到 API key。
 2. Supabase 后台 → **Edge Functions** → 新建函数 `agenda`，
-   把 `index.ts` 和 `rules.ts` 两个文件的内容贴进去 → Deploy。
+   把 **`supabase/functions/agenda/bundled.ts`** 的内容整个贴进 `index.ts` → Deploy。
+   只贴这一个文件，函数里不要留别的文件。
+
+   > `bundled.ts` 是 `rules.ts + index.ts` 拼出来的，**没有 import**。
+   > 原来分两个文件贴，网页编辑器里少一个就报
+   > `Module not found ".../rules.ts"` —— 这个坑踩过一次。
+   > 改完逻辑要跑 `node tools/build-fn.js` 重新生成；
+   > 忘了的话 `sync-lab.sh` / `publish.sh` 会拦下来。
 3. **关掉这个函数的 Verify JWT** —— iPhone 日历发不了 Authorization 头，
    鉴权改由 URL 里的 token 负责。**不关的话日历订阅会一直失败。**
 4. Edge Functions → **Secrets** 加三个：
@@ -258,6 +271,8 @@ git commit && git push # 几十秒后生效
 - [x] ~~设定收租日~~ —— 两位租客分别 19 号和 25 号，其余 1 号（谁是谁在网站上看）。
 - [x] ~~提醒~~ —— iPhone 日历订阅 + 每日邮件都已设好并验证。
 - [ ] 补房客电话。现在全是空的，填了才能用 WhatsApp 催租。
+- [ ] 生产站录 09-07 那条看房预约，并把 Perling 三楼中房独卫S 的招租价设成 RM2,000
+      （上一任 RM1,800；不设的话 11 月起的空置损失会按旧价少算 200/月）。
 - [ ] 更新两个支付宝的余额，押金覆盖率才准。账户名、币种、备注都能在「账户」页直接改。
 - [x] ~~建试验站~~ —— 2026-09-05 建好并验过。试验站是项目 `jufpoofvpwwiqxkqlpyu`，
       生产是 `jqtirkwynqlwwwtktmat`。**隔离已实测**：在试验站改数据，生产站没变。
@@ -277,9 +292,14 @@ tools/sync-lab.sh               生产 → 试验，开始改之前跑
 tools/publish.sh                试验 → 生产，试好了上线
 tools/bump.sh                   换 ?v= 版本号，破 iPhone 缓存
 tools/check-config.js           验两个站不是同一个项目、key 是 anon 不是 service_role
+tools/build-fn.js               把 rules.ts + index.ts 拼成可粘贴的 bundled.ts
+tools/check-fn.js               验 bundled.ts 没过期（生成物最怕悄悄过期）
 supabase/schema.sql             建表 + RLS，可重复跑（改过表结构后要重跑一次）
 supabase/seed.sql               初始数据（gitignore，不进仓库）
 supabase/functions/agenda/      提醒用的 Edge Function（ICS 日历 + 邮件摘要）
+  ├ rules.ts                    规则（真相来源，测试直接 import 它）
+  ├ index.ts                    取数与 HTTP 入口
+  └ bundled.ts                  ← 生成的，部署时贴这个
 .github/workflows/keepalive.yml 每周保活
 .github/workflows/notify.yml    每天叫一次 agenda 发提醒
 ```
